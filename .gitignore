@@ -1,0 +1,7 @@
+node_modules/
+dist/
+target/
+src-tauri/resources/
+src-tauri/gen/
+staging/
+*.zip
