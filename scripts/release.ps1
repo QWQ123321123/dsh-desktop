@@ -1,4 +1,4 @@
-﻿# Creates a GitHub Release for dsh-desktop and uploads the NSIS installer.
+# Creates a GitHub Release for dsh-desktop and uploads the NSIS installer.
 # Auth: reuses git's stored github.com credential (no token on disk/CLI args).
 
 $ErrorActionPreference = 'Stop'
@@ -26,7 +26,9 @@ $body = @{
   prerelease       = $true
 } | ConvertTo-Json
 
-$release = Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/$repo/releases" -Headers $headers -Body $body
+# PS5.1 sends string bodies as ASCII — encode explicitly or CJK text breaks.
+$bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
+$release = Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/$repo/releases" -Headers $headers -Body $bodyBytes -ContentType 'application/json; charset=utf-8'
 Write-Output "release created: $($release.html_url)"
 
 $uploadUrl = "https://uploads.github.com/repos/$repo/releases/$($release.id)/assets?name=$assetName"
