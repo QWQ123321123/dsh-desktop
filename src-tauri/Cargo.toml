@@ -1,6 +1,6 @@
 [package]
 name = "dsh-desktop-shell-tauri"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Tauri 2 shell for DeepSeek Harness over loopback HTTP"
 
