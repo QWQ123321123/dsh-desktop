@@ -75,6 +75,10 @@ npx tauri build                    # → src-tauri/target/release/bundle/nsis/*-
 7. **release 无控制台**：spawn 子进程要加 `CREATE_NO_WINDOW`（否则弹黑窗）；子进程 stdout/stderr 重定向到 `logs/dsh.log`。
 8. **就绪探测要用 HTTP 200，不是 TCP connect**：TCP 监听先于 webserver 插件就绪，页面加载太早会导致客户端插件树半边启动失败（`Failed to load plugins`）。
 9. **`initialization_script` 在 `navigate()` 后不保证重跑**：页面注入逻辑必须再用 `on_page_load(Finished)` 兜底。
+10. **控制通道必须带 token**：3175 是 loopback HTTP 且无 CORS 限制，不带 token 任何网页都能 `fetch` 进来关应用/偷背景图。token 在启动时生成、注入页面脚本；不可用 Origin 白名单替代（dev 下 splash 的 origin 是随机端口）。
+11. **无边框窗口不要提供全屏**：`set_fullscreen` 会换成 `WS_POPUP` 样式，退出后边框缩放失效。最大化已覆盖该场景。
+12. **identifier 即升级键**：NSIS 按 `tauri.conf.json` 的 `identifier` 生成安装 GUID，发布后改动会导致旧版无法覆盖升级。当前正式值 `com.qwq123321123.dsh-desktop`，不要再动。
+13. **dev 与 release 共用 DSH_HOME**（`%APPDATA%\dsh-desktop-shell-tauri\dsh-home`）：凭证/会话互通是刻意设计（曾经分裂导致旧 key  stranded）；代价是 dev 分支的 bug 可能污染正式数据，开发时留意。
 
 ## 升级 dsh 版本的检查清单
 
@@ -84,6 +88,13 @@ npx tauri build                    # → src-tauri/target/release/bundle/nsis/*-
 4. 重出安装包，覆盖安装一次（验证装前杀进程钩子）→ 卸载一次（验证数据目录保留）
 
 dsh 处于开发者预览期，不承诺兼容；升级前看一眼其 [BREAKING 变更](../deepseek-harness/AGENTS.md)。
+
+### 壳与 dsh DOM 的耦合点（dsh 改版面时优先检查）
+
+- **设置整页**：`[role="dialog"][aria-modal="true"]:has(nav)` 结构选择器 + fixed 全屏覆盖（CSS Modules 类名带哈希，只能按结构匹配）
+- **全局 chrome CSS**：`html { margin-top: 32px; overflow: hidden }` 依赖 dsh 的滚动容器是内部 flex 子元素
+- **菜单快捷键**：Ctrl+N / Ctrl+, 按按钮**文本**精确匹配 `新会话`/`设置`，dsh 改文案即失效（将来可换 aria-label）
+- **背景面板**：注入的 Shadow DOM 不依赖 dsh，但 `light-dark()` 主题跟随依赖 dsh 在 root 上设置 `color-scheme`
 
 ## 目录结构
 

@@ -30,17 +30,46 @@ const LOCK_PORT: u16 = PORT_FIRST - 1;
 
 static QUITTING: AtomicBool = AtomicBool::new(false);
 
+/// Random token gating the 3175 control channel. Only the injected page
+/// script knows it; any request without ?t=<token> is rejected. (An Origin
+/// allowlist is impossible: in dev the splash page sits on a random port.)
+fn make_control_token() -> String {
+    let mut buf = [0u8; 16];
+    getrandom::getrandom(&mut buf).expect("OS randomness");
+    buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Magic reply confirming the peer on LOCK_PORT is another instance of this
+/// app (not some unrelated program squatting on the port).
+const LOCK_MAGIC: &[u8] = b"dsh-lock-ok";
+
 /// Claim the instance lock before any side effect (spawning dsh). A second
 /// launch signals the running instance to surface its window and exits.
 fn claim_single_instance() -> TcpListener {
     match TcpListener::bind((HOST, LOCK_PORT)) {
         Ok(listener) => listener,
         Err(_) => {
+            let mut is_peer = false;
             if let Ok(mut peer) = TcpStream::connect((HOST, LOCK_PORT)) {
+                use std::io::Read;
                 let _ = peer.write_all(b"show");
+                // A squatter that accepts but never replies must not hang the
+                // launcher — bound the handshake.
+                let _ = peer.set_read_timeout(Some(Duration::from_millis(800)));
+                let mut buf = [0u8; 16];
+                is_peer = peer
+                    .read(&mut buf)
+                    .map(|n| buf[..n] == *LOCK_MAGIC)
+                    .unwrap_or(false);
             }
-            println!("[shell] another instance is running; handed off focus, exiting");
-            std::process::exit(0);
+            if is_peer {
+                println!("[shell] another instance is running; handed off focus, exiting");
+                std::process::exit(0);
+            }
+            // Lock port held by something else — fail visibly instead of
+            // silently exiting ("installed but won't open" with zero signal).
+            eprintln!("[shell] lock port {LOCK_PORT} is occupied by another program; refusing to start");
+            std::process::exit(1);
         }
     }
 }
@@ -110,10 +139,13 @@ impl ServerSpec {
     }
 }
 
-fn pick_port() -> u16 {
+/// Returns a listener holding the chosen port plus the port number. Keep the
+/// listener alive until the dsh child has been spawned, then drop it so the
+/// child can bind — closing the probe-then-spawn race (TOCTOU).
+fn pick_port() -> (TcpListener, u16) {
     for port in PORT_FIRST..=PORT_LAST {
-        if TcpListener::bind((HOST, port)).is_ok() {
-            return port;
+        if let Ok(listener) = TcpListener::bind((HOST, port)) {
+            return (listener, port);
         }
     }
     panic!("no free port in {PORT_FIRST}..={PORT_LAST}");
@@ -148,9 +180,54 @@ fn start_server(spec: &ServerSpec, port: u16) -> Child {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    cmd.spawn().unwrap_or_else(|e| {
+    let child = cmd.spawn().unwrap_or_else(|e| {
         panic!("failed to spawn `dsh web` via {}: {e}", spec.node.display())
-    })
+    });
+    tie_child_lifetime(&child);
+    child
+}
+
+/// Tie the dsh child's lifetime to this process via a Windows Job Object:
+/// however the shell dies (crash, taskkill, an agent killing its own host),
+/// the OS kills the whole child tree. Without this, a dead shell orphans
+/// `dsh-node.exe` holding the port. Best-effort: failure only loses the
+/// guarantee, never breaks the spawn.
+#[cfg(windows)]
+fn tie_child_lifetime(child: &Child) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+        JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            eprintln!("[shell] CreateJobObjectW failed; child lifetime not tied");
+            return;
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const _,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        ) == 0
+        {
+            eprintln!("[shell] SetInformationJobObject failed; child lifetime not tied");
+            CloseHandle(job);
+            return;
+        }
+        if AssignProcessToJobObject(job, child.as_raw_handle() as _) == 0 {
+            eprintln!("[shell] AssignProcessToJobObject failed; child lifetime not tied");
+            CloseHandle(job);
+            return;
+        }
+        // Deliberately never closed: the job must outlive the child; process
+        // exit releases it (and the limit flag kills the child tree with us).
+    }
 }
 
 /// True once the server answers `GET /` with a 2xx/3xx — a bare TCP connect
@@ -192,20 +269,24 @@ fn wait_ready(port: u16, child: &mut Child) {
 fn kill_tree(pid: u32) {
     #[cfg(windows)]
     {
-        // /T kills the process tree (dsh spawns its own worker children).
-        let mut cmd = Command::new("taskkill");
-        cmd.args(["/PID", &pid.to_string(), "/T", "/F"]);
-        #[cfg(not(debug_assertions))]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-        let _ = cmd.spawn();
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        // Graceful attempt first (no /F; on a console-less node this may be a
+        // no-op — the forced pass is the backstop). Both passes wait on
+        // .status() so the shell's exit never races the kill.
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
+        std::thread::sleep(Duration::from_millis(1500));
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
     }
     #[cfg(not(windows))]
     {
-        let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).spawn();
+        let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
     }
 }
 
@@ -251,15 +332,31 @@ fn set_bg_opacity(v: f32) {
     std::fs::write(bg_opacity_path(), clamped.to_string()).expect("store opacity");
 }
 
+/// Cache of (file mtime, base64 data URI) for the background image so
+/// repeated /bg/state polls don't re-read and re-encode a large file.
+static BG_IMAGE_CACHE: Mutex<Option<(std::time::SystemTime, String)>> = Mutex::new(None);
+
 /// Current background state as JSON for the in-page panel.
 fn bg_state_json() -> String {
     use base64::Engine;
-    let image = std::fs::read(bg_image_path()).ok().map(|bytes| {
-        format!(
-            "data:image/png;base64,{}",
-            base64::engine::general_purpose::STANDARD.encode(bytes)
-        )
-    });
+    let path = bg_image_path();
+    let mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+    let mut cache = BG_IMAGE_CACHE.lock().expect("bg image cache");
+    let image = match (&*cache, mtime) {
+        (Some((t, s)), Some(m)) if *t == m => Some(s.clone()),
+        _ => {
+            let encoded = std::fs::read(&path).ok().map(|bytes| {
+                format!(
+                    "data:image/png;base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(bytes)
+                )
+            });
+            if let (Some(m), Some(s)) = (mtime, &encoded) {
+                *cache = Some((m, s.clone()));
+            }
+            encoded
+        }
+    };
     format!(
         "{{\"opacity\":{},\"image\":{}}}",
         bg_opacity(),
@@ -293,7 +390,11 @@ fn reload_page_background(app: &AppHandle) {
 /// Minimal plain-HTTP responder for the in-page panel. GET-only, loopback,
 /// permissive CORS (the dsh page origin differs by port, so preflight-free
 /// GETs still need ACAO on the response).
-fn serve_control(app: AppHandle, ready_port: std::sync::Arc<Mutex<Option<u16>>>) {
+fn serve_control(
+    app: AppHandle,
+    ready_port: std::sync::Arc<Mutex<Option<u16>>>,
+    token: String,
+) {
     let listener = match TcpListener::bind((HOST, CONTROL_PORT)) {
         Ok(l) => l,
         Err(e) => {
@@ -306,19 +407,29 @@ fn serve_control(app: AppHandle, ready_port: std::sync::Arc<Mutex<Option<u16>>>)
             let Ok(mut stream) = conn else { continue };
             let app = app.clone();
             let ready_port = std::sync::Arc::clone(&ready_port);
+            let token = token.clone();
             std::thread::spawn(move || {
                 use std::io::{Read, Write};
                 let mut buf = [0u8; 4096];
                 let Ok(n) = stream.read(&mut buf) else { return };
                 let req = String::from_utf8_lossy(&buf[..n]);
-                let path = req
-                    .split_whitespace()
-                    .nth(1)
-                    .unwrap_or("/")
-                    .split('?')
-                    .next()
-                    .unwrap_or("/");
-                let query = req.split_whitespace().nth(1).unwrap_or("");
+                let mut parts = req.split_whitespace();
+                let method = parts.next().unwrap_or("");
+                let target = parts.next().unwrap_or("/");
+                let (path, query) = target.split_once('?').unwrap_or((target, ""));
+
+                // Token gate: only the injected page script knows the token.
+                let authed = method == "GET"
+                    && query
+                        .split('&')
+                        .any(|kv| kv.strip_prefix("t=").map(|v| v == token).unwrap_or(false));
+                if !authed {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                    return;
+                }
+
                 let body = match path {
                     "/bg/state" => bg_state_json(),
                     "/bg/pick" => {
@@ -333,9 +444,9 @@ fn serve_control(app: AppHandle, ready_port: std::sync::Arc<Mutex<Option<u16>>>)
                     }
                     "/bg/opacity" => {
                         if let Some(v) = query
-                            .split("v=")
-                            .nth(1)
-                            .and_then(|s| s.split('&').next()?.parse::<f32>().ok())
+                            .split('&')
+                            .find_map(|kv| kv.strip_prefix("v="))
+                            .and_then(|s| s.parse::<f32>().ok())
                         {
                             set_bg_opacity(v);
                         }
@@ -379,9 +490,12 @@ fn serve_control(app: AppHandle, ready_port: std::sync::Arc<Mutex<Option<u16>>>)
                             }
                             "/win/quit" => app.exit(0),
                             "/win/about" => {
+                                let ver = app.package_info().version.to_string();
                                 rfd::MessageDialog::new()
                                     .set_title("关于 DeepSeek Harness")
-                                    .set_description("DeepSeek Harness 桌面客户端\nTauri 2 壳 + dsh web 后端\n版本 0.2.0")
+                                    .set_description(&format!(
+                                        "DeepSeek Harness 桌面客户端\nTauri 2 壳 + dsh web 后端\n版本 {ver}"
+                                    ))
                                     .show();
                             }
                             _ => {}
@@ -417,7 +531,11 @@ const PANEL_SCRIPT: &str = r##"(() => {
   const pagePort = Number(location.port);
   const onDsh = location.hostname === '127.0.0.1' && pagePort >= 3177 && pagePort <= 3186;
   const onSplash = location.pathname.endsWith('splash.html');
-  function cmd(p) { return fetch(API + p).catch(() => {}); }
+  const TOKEN = '__DSH_TOKEN__'; // replaced by the shell at injection time
+  function api(p) {
+    return fetch(API + p + (p.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(TOKEN));
+  }
+  function cmd(p) { return api(p).catch(() => {}); }
   function clickDsh(text) {
     [...document.querySelectorAll('button')].find(b => b.textContent.trim() === text)?.click();
   }
@@ -431,12 +549,8 @@ const PANEL_SCRIPT: &str = r##"(() => {
       { label: '退出', act: () => cmd('/win/quit') },
     ]},
     { label: '编辑', items: [
-      { label: '撤销', key: 'Ctrl+Z', act: () => document.execCommand('undo') },
-      { label: '重做', key: 'Ctrl+Y', act: () => document.execCommand('redo') },
-      '-',
-      { label: '剪切', key: 'Ctrl+X', act: () => document.execCommand('cut') },
-      { label: '复制', key: 'Ctrl+C', act: () => document.execCommand('copy') },
-      { label: '粘贴', key: 'Ctrl+V', act: () => navigator.clipboard.readText().then(t => document.execCommand('insertText', false, t)).catch(() => {}) },
+      // 只留全选：剪贴/复制/粘贴在 React 受控输入框上靠 execCommand 必然失效，
+      // 原生右键菜单（M3 放行后）已覆盖这些编辑操作。
       { label: '全选', key: 'Ctrl+A', act: () => document.execCommand('selectAll') },
     ]},
     { label: '视图', items: [
@@ -579,7 +693,7 @@ const PANEL_SCRIPT: &str = r##"(() => {
   // editing actions.
   document.addEventListener('contextmenu', e => {
     const t = e.target;
-    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
     e.preventDefault();
   });
 
@@ -589,7 +703,7 @@ const PANEL_SCRIPT: &str = r##"(() => {
   if (onSplash) {
     const poll = setInterval(async () => {
       try {
-        const r = await (await fetch(API + '/win/state')).json();
+        const r = await (await api('/win/state')).json();
         if (r.url) {
           clearInterval(poll);
           document.body.style.transition = 'opacity .25s ease';
@@ -604,7 +718,7 @@ const PANEL_SCRIPT: &str = r##"(() => {
   let panel, slider, overlay;
   async function applyState() {
     try {
-      const s = await (await fetch(API + '/bg/state')).json();
+      const s = await (await api('/bg/state')).json();
       document.getElementById('dsh-shell-bg')?.remove();
       overlay = null;
       if (s.image) {
@@ -660,14 +774,14 @@ const PANEL_SCRIPT: &str = r##"(() => {
     slider = shadow.getElementById('op');
     const val = shadow.getElementById('val');
     shadow.querySelector('.fab').onclick = () => panel.classList.toggle('open');
-    shadow.getElementById('pick').onclick = async () => { await fetch(API + '/bg/pick'); applyState(); };
-    shadow.getElementById('clear').onclick = async () => { await fetch(API + '/bg/clear'); applyState(); };
+    shadow.getElementById('pick').onclick = async () => { await api('/bg/pick'); applyState(); };
+    shadow.getElementById('clear').onclick = async () => { await api('/bg/clear'); applyState(); };
     let t;
     slider.oninput = () => {
       val.textContent = slider.value;
       if (overlay) overlay.style.opacity = slider.value / 100;
       clearTimeout(t);
-      t = setTimeout(() => fetch(API + '/bg/opacity?v=' + slider.value / 100), 300);
+      t = setTimeout(() => api('/bg/opacity?v=' + slider.value / 100), 300);
     };
     slider.oninput();
   }
@@ -719,14 +833,20 @@ pub fn run() {
 
     tauri::Builder::default()
         .setup(move |app| {
-            // Focus handoff: a second launch connects to LOCK_PORT; any
-            // incoming byte surfaces this instance's window.
+            // Focus handoff: a second launch connects to LOCK_PORT and says
+            // "show"; we answer with LOCK_MAGIC so squatters are detectable.
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 for conn in lock.incoming() {
-                    if conn.is_ok() {
+                    let Ok(mut stream) = conn else { continue };
+                    let handle = handle.clone();
+                    std::thread::spawn(move || {
+                        use std::io::{Read, Write};
+                        let mut buf = [0u8; 16];
+                        let _ = stream.read(&mut buf);
+                        let _ = stream.write_all(LOCK_MAGIC);
                         show_window(&handle);
-                    }
+                    });
                 }
             });
             let show = MenuItemBuilder::with_id("show", "显示 DeepSeek Harness").build(app)?;
@@ -743,8 +863,13 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "show" => show_window(app),
                     "bg" => {
-                        pick_background_file();
-                        reload_page_background(app);
+                        // rfd's modal dialog blocks the caller; keep it off
+                        // the main (event-loop) thread.
+                        let app = app.clone();
+                        std::thread::spawn(move || {
+                            pick_background_file();
+                            reload_page_background(&app);
+                        });
                     }
                     "bg_clear" => {
                         clear_background_file();
@@ -765,7 +890,10 @@ pub fn run() {
                 })
                 .build(app)?;
             println!("[shell] tray created");
-            serve_control(app.handle().clone(), port_for_control);
+            // Token-gate the control channel; only the injected script knows it.
+            let token = make_control_token();
+            let panel_script = PANEL_SCRIPT.replace("__DSH_TOKEN__", &token);
+            serve_control(app.handle().clone(), port_for_control, token);
 
             // Splash first: the window shows the loading page immediately while
             // dsh boots on a worker thread; ready → splash navigates itself via /win/state.
@@ -779,36 +907,44 @@ pub fn run() {
             // In-page chrome on every page; initialization_script covers fresh
             // loads, on_page_load re-injects after navigations (init scripts
             // may only run on the first document in some wry versions).
-            win_builder = win_builder.initialization_script(PANEL_SCRIPT).on_page_load(
-                |win, payload| {
+            win_builder = win_builder
+                .initialization_script(&panel_script)
+                .on_page_load(move |win, payload| {
                     if payload.event() == tauri::webview::PageLoadEvent::Finished {
-                        let _ = win.eval(PANEL_SCRIPT);
+                        let _ = win.eval(&panel_script);
                     }
-                },
-            );
+                });
             let win = win_builder.build()?;
             // DevTools on demand only: 视图 → 开发者工具 (F12). Auto-opening it
             // also enabled the device-toolbar viewport badge ("1280px × 840px").
 
             let win_thread = win.clone();
             std::thread::spawn(move || {
-                let spec = ServerSpec::resolve();
-                let port = pick_port();
-                println!("[shell] picked port {port}");
-                let mut child = start_server(&spec, port);
-                *pid_for_boot.lock().expect("pid slot") = Some(child.id());
-                // wait_ready panics on failure; surface that on the splash page
-                // instead of killing the whole shell.
-                let ready = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // Everything that can panic lives inside the boundary: a dead
+                // boot thread would otherwise leave the splash stuck forever.
+                let boot = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let spec = ServerSpec::resolve();
+                    // Hold the port until the dsh child exists (TOCTOU guard),
+                    // then release it for the child to bind.
+                    let (_guard, port) = pick_port();
+                    println!("[shell] picked port {port}");
+                    let mut child = start_server(&spec, port);
+                    drop(_guard);
+                    *pid_for_boot.lock().expect("pid slot") = Some(child.id());
                     wait_ready(port, &mut child);
+                    port
                 }));
-                match ready {
-                    Ok(()) => {
+                match boot {
+                    Ok(port) => {
                         println!("[shell] dsh web ready on http://{HOST}:{port}");
                         // The splash page polls /win/state and navigates itself.
                         *port_for_boot.lock().expect("port slot") = Some(port);
                     }
                     Err(_) => {
+                        // Clean up a half-started dsh tree before the error.
+                        if let Some(pid) = *pid_for_boot.lock().expect("pid slot") {
+                            kill_tree(pid);
+                        }
                         let _ = win_thread.eval(
                             "document.getElementById('status').textContent = '后端启动失败，请查看日志后重启应用';",
                         );

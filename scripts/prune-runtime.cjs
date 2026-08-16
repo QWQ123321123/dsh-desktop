@@ -12,10 +12,12 @@ const ROOT = path.join(__dirname, '..', 'src-tauri', 'resources', 'dsh-runtime',
 const FILE_PATTERNS = [
   /\.map$/,
   /\.d\.[cm]?ts$/,
-  /\.(md|markdown|txt)$/i,
-  /^(LICENSE|LICENCE|CHANGELOG|CHANGES|HISTORY|AUTHORS|NOTICE)(\.|$)/i,
+  /\.(md|markdown)$/i,
+  /^(CHANGELOG|CHANGES|HISTORY|AUTHORS|NOTICE)(\.|$)/i,
   /^(tsconfig\..*|\.npmignore|\.eslintrc.*|\.editorconfig|\.gitattributes|\.gitignore)$/,
   /\.tsbuildinfo$/,
+  // LICENSE files are KEPT (compliance); .txt files are KEPT (some packages
+  // read runtime data from .txt — deleting them is a landmine for zero gain).
 ];
 
 // Directories safe to drop. NOTE: no 'doc'/'docs' — the `yaml` npm package
