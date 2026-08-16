@@ -5,7 +5,8 @@
 param(
   [string]$Tag = 'v0.2.1',
   [string]$Repo = 'QWQ123321123/dsh-desktop',
-  [string]$Notes = ''
+  [string]$Notes = '',
+  [string]$NotesFile = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,7 +30,7 @@ $body = @{
   tag_name         = $tag
   target_commitish = 'main'
   name             = "dsh-desktop $tag"
-  body             = $(if ($Notes) { $Notes } else { "dsh-desktop $tag — Windows x64 安装包（NSIS）。" })
+  body             = $(if ($NotesFile) { [System.IO.File]::ReadAllText((Resolve-Path $NotesFile).Path) } elseif ($Notes) { $Notes } else { "dsh-desktop $tag — Windows x64 安装包（NSIS）。" })
   draft            = $false
   prerelease       = $true
 } | ConvertTo-Json
@@ -43,6 +44,8 @@ $uploadUrl = "https://uploads.github.com/repos/$repo/releases/$($release.id)/ass
 $bytes = [System.IO.File]::ReadAllBytes($asset)
 $res = Invoke-RestMethod -Method Post -Uri $uploadUrl -Headers ($headers + @{ 'Content-Type' = 'application/octet-stream' }) -Body $bytes -TimeoutSec 600
 Write-Output "asset uploaded: $($res.browser_download_url) ($([math]::Round($res.size/1MB,1))MB)"
+
+
 
 
 
