@@ -62,7 +62,7 @@ npx tauri build                    # → src-tauri/target/release/bundle/nsis/*-
 | 控制通道端口 | `3175`（GET-only，背景面板的页面↔壳桥接） |
 | 应用数据目录 | `%APPDATA%\dsh-desktop-shell-tauri\`（`dsh-home/`、`logs/dsh.log`、`background.*`） |
 
-页面内背景面板的实现：webview 加载的是远程 http 源，Tauri IPC 不可用，壳在 3175 起极简 HTTP 端点（`/bg/state|pick|clear|opacity`，带 `ACAO: *`），页面脚本（Shadow DOM 注入，`on_page_load` + `initialization_script` 双保险）通过 fetch 调用。
+页面内背景面板的实现：webview 加载的是远程 http 源，Tauri IPC 不可用，壳在 3175 起极简 HTTP 端点（`/bg/state|pick|clear|opacity`，带 `ACAO: *`），页面脚本（Shadow DOM 注入，`on_page_load` + `initialization_script` 双保险）通过 fetch 调用。该脚本本体是独立文件 `src-tauri/assets/shell-panel.js`（编译期 `include_str!` 注入，build.rs 里 `node --check` 校验语法，`__DSH_TOKEN__` 占位符由壳在注入时替换）。
 
 ## 已知坑（都是踩过的）
 
@@ -89,6 +89,19 @@ npx tauri build                    # → src-tauri/target/release/bundle/nsis/*-
 
 dsh 处于开发者预览期，不承诺兼容；升级前看一眼其 [BREAKING 变更](../deepseek-harness/AGENTS.md)。
 
+## 自动化冒烟测试
+
+`scripts/smoke-test.py` 把 13.2 验收清单中可无头自动化的部分固化为一键回归，覆盖：控制通道 token 门禁（无 token 全 403）、端口退让、端口全占失败路径、单实例握手、锁端口被无关程序占用时拒绝启动、退出无孤儿进程、退出后立即重启。
+
+```sh
+cd src-tauri && cargo build        # 先构建 dev exe（或 npm run dev 一次）
+cd .. && python scripts/smoke-test.py
+```
+
+前置条件：工作区已 `npm install`（`node_modules/@deepseek-ai/dsh` 存在）、没有正在运行的应用实例（脚本会前置检查 3175/3176 端口并明确报错）。测试期间应用窗口会短暂弹出数次；脚本只调用只读端点，不写背景/凭证数据（dev/release 共用 DSH_HOME 的已知坑 #13 依旧存在）。
+
+不覆盖的手工项：splash 视觉跳转、背景选择对话框、右键菜单行为、关于对话框、>10MB 背景流畅度、覆盖安装/卸载（仍走 13.2 清单）。
+
 ### 壳与 dsh DOM 的耦合点（dsh 改版面时优先检查）
 
 - **设置整页**：`[role="dialog"][aria-modal="true"]:has(nav)` 结构选择器 + fixed 全屏覆盖（CSS Modules 类名带哈希，只能按结构匹配）
@@ -100,10 +113,11 @@ dsh 处于开发者预览期，不承诺兼容；升级前看一眼其 [BREAKING
 
 ```
 src-tauri/            Rust 壳（src/lib.rs 是全部主逻辑）
+  assets/shell-panel.js  注入页面的 UI 脚本（标题栏/菜单/背景面板；编译期注入，node --check 校验）
   resources/          打包资源（node 运行时 + dsh 依赖树，不入库）
   nsis-hooks.nsh      安装器装前/卸前杀 sidecar
 assets/               DeepSeek logo SVG
-scripts/              gen-icons / gen-splash / prune-runtime / 诊断脚本
+scripts/              gen-icons / gen-splash / prune-runtime / smoke-test / 诊断脚本
 dist/                 splash.html（构建产物，可重新生成）
 ```
 

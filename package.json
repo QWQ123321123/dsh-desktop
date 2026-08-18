@@ -1,11 +1,12 @@
 {
   "name": "dsh-desktop-shell-tauri",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "Tauri 2 counterpart prototype: dsh web over loopback HTTP with a Node sidecar",
   "scripts": {
     "dev": "tauri dev",
-    "icons": "node scripts/gen-icons.cjs"
+    "icons": "node scripts/gen-icons.cjs",
+    "check:panel": "node --check src-tauri/assets/shell-panel.js"
   },
   "dependencies": {
     "@deepseek-ai/dsh": "0.1.0-rc.6"
