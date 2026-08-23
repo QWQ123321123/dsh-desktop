@@ -20,15 +20,15 @@
     return fetch(API + p + (p.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(TOKEN));
   }
   function cmd(p) { return api(p).catch(() => {}); }
-  function clickDsh(text) {
-    [...document.querySelectorAll('button')].find(b => b.textContent.trim() === text)?.click();
+  function clickDsh(...texts) {
+    [...document.querySelectorAll('button')].find(b => texts.includes(b.textContent.trim()))?.click();
   }
 
   // ---------------- custom titlebar (Codex-style chrome) ----------------
   const MENUS = [
     { label: '文件', items: [
-      { label: '新建会话', key: 'Ctrl+N', act: () => clickDsh('新会话') },
-      { label: '设置', key: 'Ctrl+,', act: () => clickDsh('设置') },
+      { label: '新建会话', key: 'Ctrl+N', act: () => clickDsh('新会话', 'New Session') },
+      { label: '设置', key: 'Ctrl+,', act: () => clickDsh('设置', 'Settings') },
       '-',
       { label: '退出', act: () => cmd('/win/quit') },
     ]},
@@ -167,8 +167,8 @@
   }
 
   document.addEventListener('keydown', e => {
-    if (e.ctrlKey && !e.shiftKey && (e.key === 'n' || e.key === 'N')) { e.preventDefault(); clickDsh('新会话'); }
-    if (e.ctrlKey && e.key === ',') { e.preventDefault(); clickDsh('设置'); }
+    if (e.ctrlKey && !e.shiftKey && (e.key === 'n' || e.key === 'N')) { e.preventDefault(); clickDsh('新会话', 'New Session'); }
+    if (e.ctrlKey && e.key === ',') { e.preventDefault(); clickDsh('设置', 'Settings'); }
     if (e.key === 'F12') { e.preventDefault(); cmd('/win/devtools'); }
   });
 

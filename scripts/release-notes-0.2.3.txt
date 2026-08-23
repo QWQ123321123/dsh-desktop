@@ -1,0 +1,15 @@
+# dsh-desktop v0.2.3 — Windows x64 安装包（NSIS）
+
+升级内嵌 dsh 后端 **0.1.0-rc.6 → 0.1.1-rc.2**（上游 849 个提交），同步适配壳代码。
+
+## 变更
+
+- **dsh 升级到 0.1.1-rc.2**：多模态图像管线（自动缩放/格式转换/压缩，DeepSeek Files API 上传复用）、权限预设（read-only / workspace-write / danger-full-access）、Agent Presets、@文件/@会话引用、消息反馈（like/dislike）、交付物行、Model/Effort 选择器、workflow 运行节点、设置页插件配置卡等上游新功能随包生效。
+- **`--no-open`**：dsh 0.1.1 起默认自动打开系统浏览器，壳已禁用（应用自带窗口）。
+- **注入脚本中英双语适配**：Ctrl+N / Ctrl+, 的按钮文案匹配同时支持「新会话/New Session」「设置/Settings」，避免默认语言兜底切换后快捷键失效。
+- 会话数据（JSONL）格式兼容，旧会话可读；SQLite 仅作内存索引，无迁移问题。
+
+## 已知事项
+
+- dev 与 release 共用 DSH_HOME（`%APPDATA%\dsh-desktop-shell-tauri\dsh-home`）。
+- 控制通道（127.0.0.1:3175）为 token 门禁的 GET-only 接口；服务端口 3177–3186 退让选择。

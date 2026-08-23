@@ -160,6 +160,9 @@ fn start_server(spec: &ServerSpec, port: u16) -> Child {
         "web".to_string(),
         "--port".to_string(),
         port.to_string(),
+        // dsh 0.1.1+ auto-opens the system browser by default; the shell has
+        // its own window, so the server must never spawn one.
+        "--no-open".to_string(),
     ])
     // An Electron-based IDE terminal exports this; it must not leak into
     // the Node child (every spawned binary would degrade to plain Node).

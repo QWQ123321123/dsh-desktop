@@ -29,7 +29,7 @@ npm install                        # 装 @tauri-apps/cli 等
 # 1. 准备运行时资源（写入 src-tauri/resources/，此目录不入库）
 mkdir -p src-tauri/resources/dsh-runtime
 cd src-tauri/resources/dsh-runtime
-echo '{"name":"dsh-runtime","private":true,"dependencies":{"@deepseek-ai/dsh":"0.1.0-rc.6"}}' > package.json
+echo '{"name":"dsh-runtime","private":true,"dependencies":{"@deepseek-ai/dsh":"0.1.1-rc.2"}}' > package.json
 npm install --omit=dev --no-audit --no-fund
 cd ../../..
 node scripts/prune-runtime.cjs     # 裁剪 .map/.d.ts/非 win32-x64 原生二进制等

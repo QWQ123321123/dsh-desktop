@@ -1,0 +1,14 @@
+# dsh-desktop v0.2.2 — Windows x64 安装包（NSIS）
+
+内部重构与测试基建版本，无用户可见功能变化。
+
+## 变更
+
+- **PANEL_SCRIPT 独立化**：注入页面的 UI 脚本（标题栏/菜单/背景面板，约 300 行）从 Rust 源码中的字符串常量抽出为独立文件 `src-tauri/assets/shell-panel.js`，编译期 `include_str!` 注入；脚本损坏现在会在构建期被 `node --check` 拦下，而不是运行时标题栏悄悄消失。
+- **自动化冒烟测试**：新增 `scripts/smoke-test.py`，一键回归壳的核心逻辑——控制通道 token 门禁（无 token 全 403）、端口退让、端口全占失败路径、单实例握手、锁端口被占用时拒绝启动、退出无孤儿进程、退出后立即重启。21 项断言全绿。
+- README 补充冒烟测试说明；`npm run check:panel` 提供手动语法校验。
+
+## 已知事项
+
+- dev 与 release 共用 DSH_HOME（`%APPDATA%\dsh-desktop-shell-tauri\dsh-home`），凭证/会话互通是刻意设计。
+- 控制通道（127.0.0.1:3175）为 token 门禁的 GET-only 接口；服务端口 3177–3186 退让选择。
