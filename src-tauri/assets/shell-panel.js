@@ -44,6 +44,8 @@
       // 会导致边框缩放失效；最大化已覆盖该场景。
     ]},
     { label: '帮助', items: [
+      { label: '检查更新…', act: () => updateFlow() },
+      '-',
       { label: '关于 DeepSeek Harness', act: () => cmd('/win/about') },
     ]},
   ];
@@ -291,10 +293,257 @@
     document.documentElement.appendChild(style);
   }
 
+  // ---------------- self-update dialog (帮助 → 检查更新) ----------------
+  // The flow rides the control channel: check → start (background download
+  // on the Rust side) → poll status → install (spawn installer + exit).
+  function esc(s) {
+    const d = document.createElement('div');
+    d.textContent = String(s);
+    return d.innerHTML;
+  }
+  function fmtSize(n) {
+    if (!n) return '';
+    const mb = n / 1048576;
+    return mb >= 1 ? mb.toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
+  }
+  let updateHost = null;
+  function showUpdate(html, buttons) {
+    if (!updateHost) {
+      updateHost = document.createElement('div');
+      updateHost.id = 'dsh-shell-update';
+      document.documentElement.appendChild(updateHost);
+    }
+    const shadow = updateHost.shadowRoot || updateHost.attachShadow({ mode: 'open' });
+    const btnHtml = buttons.map(b => `<button class="b${b.primary ? ' primary' : ''}" data-b="${b.id}">${b.label}</button>`).join('');
+    shadow.innerHTML = `
+      <style>
+        .mask { position:fixed; inset:0; z-index:2147483647; display:flex; align-items:center; justify-content:center;
+                background:rgba(0,0,0,.35); font:13px/1.6 "Segoe UI","Microsoft YaHei",sans-serif;
+                color: light-dark(#1f2328,#e8eaed); }
+        .card { width:440px; max-width:calc(100vw - 48px); border-radius:12px; padding:18px 20px;
+                background: light-dark(#fff,#2a2a2d); box-shadow:0 8px 32px rgba(0,0,0,.35);
+                animation: dshPopIn .18s ease-out; }
+        .t { font-size:15px; font-weight:600; margin-bottom:10px; }
+        .notes { max-height:180px; overflow:auto; white-space:pre-wrap; word-break:break-word;
+                 font-size:12px; opacity:.85; border:1px solid light-dark(#dde1e7,#3a3d44);
+                 border-radius:8px; padding:8px 10px; margin-bottom:6px; }
+        .meta { font-size:12px; opacity:.7; margin-bottom:12px; }
+        .bar { height:6px; border-radius:3px; background: light-dark(#e8ebef,#3a3d44); overflow:hidden; margin:10px 0 4px; }
+        .bar i { display:block; height:100%; width:0%; background:#4d7dfe; transition:width .25s ease; }
+        .pct { font-size:12px; opacity:.75; margin-bottom:12px; }
+        .btns { display:flex; justify-content:flex-end; gap:8px; margin-top:14px; }
+        button.b { padding:6px 14px; border-radius:7px; border:1px solid light-dark(#dde1e7,#44464c);
+                   background: light-dark(#f7f8fa,#3a3d44); cursor:pointer; font-size:13px;
+                   color: inherit; transition: background .12s ease, transform .08s ease; }
+        button.b:hover { background: light-dark(#eef1f6,#484b54); }
+        button.b:active { transform: scale(.97); }
+        button.b.primary { background:#4d7dfe; border-color:#4d7dfe; color:#fff; }
+        button.b.primary:hover { background:#3f6ce8; }
+      </style>
+      <div class="mask"><div class="card">${html}<div class="btns">${btnHtml}</div></div></div>`;
+    for (const b of buttons) {
+      shadow.querySelector(`[data-b="${b.id}"]`).onclick = () => b.act(shadow);
+    }
+    return shadow;
+  }
+  function closeUpdate() { updateHost?.remove(); updateHost = null; }
+
+  const updateButtons = {
+    dl: () => { cmd('/win/update/open'); closeUpdate(); },
+    ok: () => closeUpdate(),
+    retry: () => updateFlow(),
+  };
+
+  async function updateFlow() {
+    showUpdate(`<div class="t">正在检查更新…</div>`,
+      [{ id: 'ok', label: '关闭', act: updateButtons.ok }]);
+    let r;
+    try {
+      r = await (await api('/win/update/check')).json();
+    } catch (e) {
+      showUpdate(`<div class="t">检查更新失败</div><div class="meta">无法连接更新服务。请检查网络后重试，或从下载页手动安装。</div>`,
+        [{ id: 'dl', label: '打开下载页', act: updateButtons.dl },
+         { id: 'retry', label: '重试', act: updateButtons.retry },
+         { id: 'ok', label: '关闭', act: updateButtons.ok }]);
+      return;
+    }
+    if (!r.ok) {
+      showUpdate(`<div class="t">检查更新失败</div><div class="meta">${esc(r.error || '未知错误')}</div>`,
+        [{ id: 'dl', label: '打开下载页', act: updateButtons.dl },
+         { id: 'ok', label: '关闭', act: updateButtons.ok }]);
+      return;
+    }
+    if (!r.has_update) {
+      showUpdate(`<div class="t">已是最新版本</div><div class="meta">当前版本 v${esc(r.current)}</div>`,
+        [{ id: 'ok', label: '关闭', act: updateButtons.ok }]);
+      return;
+    }
+    const notes = (r.notes || '').trim();
+    showUpdate(
+      `<div class="t">发现新版本 v${esc(r.version)}</div>` +
+      (notes ? `<div class="notes">${esc(notes)}</div>` : '') +
+      `<div class="meta">安装包大小 ${fmtSize(r.size)} · 当前版本 v${esc(r.current)}</div>`,
+      [{ id: 'go', label: '立即更新', primary: true, act: () => startUpdate() },
+       { id: 'dl', label: '打开下载页', act: updateButtons.dl },
+       { id: 'ok', label: '稍后', act: updateButtons.ok }]);
+  }
+
+  async function startUpdate() {
+    // A previous round may have finished downloading already — surface the
+    // install button directly instead of re-downloading.
+    let st;
+    try { st = await (await api('/win/update/status')).json(); } catch (e) { /* poll handles it */ }
+    if (st && st.ok && st.state === 'ready') { await pollUpdate(); return; }
+    showUpdate(`<div class="t">正在下载更新…</div><div class="bar"><i></i></div><div class="pct"></div>`,
+      [{ id: 'ok', label: '后台继续', act: updateButtons.ok }]);
+    try { await (await api('/win/update/start')).json(); } catch (e) { /* poll will surface the error */ }
+    await pollUpdate();
+  }
+
+  function pollUpdate() {
+    return new Promise(resolve => {
+      const poll = setInterval(async () => {
+        let r;
+        try { r = await (await api('/win/update/status')).json(); } catch (e) { return; }
+        if (!r || !r.ok) return;
+        if (r.state === 'downloading') {
+          const pct = r.total ? Math.min(100, Math.round(r.downloaded / r.total * 100)) : 0;
+          showUpdate(`<div class="t">正在下载更新…</div><div class="bar"><i style="width:${pct}%"></i></div><div class="pct">${pct}% · ${fmtSize(r.downloaded)} / ${fmtSize(r.total)}</div>`,
+            [{ id: 'ok', label: '后台继续', act: updateButtons.ok }]);
+        } else if (r.state === 'verifying') {
+          showUpdate(`<div class="t">正在校验安装包…</div>`,
+            [{ id: 'ok', label: '后台继续', act: updateButtons.ok }]);
+        } else if (r.state === 'ready') {
+          clearInterval(poll);
+          showUpdate(`<div class="t">更新已就绪</div><div class="meta">应用将退出并自动安装，安装完成后请重新打开。</div>`,
+            [{ id: 'go', label: '立即安装', primary: true, act: () => cmd('/win/update/install') },
+             { id: 'ok', label: '稍后', act: updateButtons.ok }]);
+          resolve();
+        } else if (r.state === 'error') {
+          clearInterval(poll);
+          showUpdate(`<div class="t">下载失败</div><div class="meta">${esc(r.error || '未知错误')}</div>`,
+            [{ id: 'dl', label: '打开下载页', act: updateButtons.dl },
+             { id: 'retry', label: '重试', act: () => startUpdate() },
+             { id: 'ok', label: '关闭', act: updateButtons.ok }]);
+          resolve();
+        }
+      }, 600);
+    });
+  }
+  window.__dshCheckUpdate = updateFlow;
+
+  // ---------------- 语音输入（按住说话，仅 dsh 页面） ----------------
+  // 按住 🎤 → /speech/start（WinRT 连续识别）；松开 → /speech/stop 取文本，
+  // 注入 dsh 的受控输入框（native setter + input 事件绕过 React 检查）。
+  let speechUi = null;
+  function findComposer() {
+    return document.querySelector('main textarea')
+        || document.querySelector('textarea')
+        || document.querySelector('[contenteditable="true"]');
+  }
+  function injectSpeech(text) {
+    const el = findComposer();
+    if (!el) return false;
+    if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+      const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+      const cur = el.value || '';
+      const next = (cur ? cur.replace(/\s+$/, '') + ' ' : '') + text;
+      setter.call(el, next);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.focus();
+    } else {
+      el.focus();
+      document.execCommand('insertText', false, (el.textContent ? ' ' : '') + text);
+    }
+    return true;
+  }
+  function buildSpeechButton() {
+    if (speechUi || !onDsh) return;
+    const host = document.createElement('div');
+    host.id = 'dsh-shell-speech';
+    const shadow = host.attachShadow({ mode: 'open' });
+    shadow.innerHTML = `
+      <style>
+        .wrap { position:fixed; right:16px; bottom:64px; z-index:2147483647;
+                display:flex; flex-direction:column; align-items:center; gap:6px; }
+        .mic { width:44px; height:44px; border-radius:50%; border:1px solid light-dark(#dde1e7,#44464c);
+               background: light-dark(#fff,#2a2a2d); cursor:pointer; font-size:18px; line-height:1;
+               box-shadow:0 2px 8px rgba(0,0,0,.12); transition: transform .12s ease, background .15s ease; }
+        .mic:hover { transform: scale(1.08); }
+        .mic:active { transform: scale(.94); }
+        .mic.live { background:#e81123; border-color:#e81123;
+                    animation: dshMicPulse 1.2s ease-in-out infinite; }
+        @keyframes dshMicPulse { 0%,100% { box-shadow:0 0 0 0 rgba(232,17,35,.4); }
+                                 50% { box-shadow:0 0 0 10px rgba(232,17,35,0); } }
+        .tip { display:none; max-width:220px; padding:4px 10px; border-radius:6px;
+               font:12px/1.5 "Segoe UI","Microsoft YaHei",sans-serif; text-align:center;
+               color: light-dark(#1f2328,#e8eaed); background: light-dark(rgba(252,252,252,.97),rgba(42,42,45,.97));
+               border:1px solid light-dark(#dde1e7,#44464c); box-shadow:0 2px 10px rgba(0,0,0,.18); }
+        .tip.show { display:block; }
+      </style>
+      <div class="wrap">
+        <div class="tip">按住说话，松开后输入到对话框</div>
+        <button class="mic" title="语音输入（按住说话）">🎤</button>
+      </div>`;
+    document.documentElement.appendChild(host);
+    speechUi = { host, shadow };
+    const mic = shadow.querySelector('.mic');
+    const tip = shadow.querySelector('.tip');
+    let listening = false;
+    let pendingStop = false;
+    let tipTimer = null;
+    function showTip(msg, ms = 2500) {
+      tip.textContent = msg;
+      tip.classList.add('show');
+      clearTimeout(tipTimer);
+      tipTimer = setTimeout(() => tip.classList.remove('show'), ms);
+    }
+    async function beginListen() {
+      if (listening) return;
+      pendingStop = false;
+      let r;
+      try { r = await (await api('/speech/start')).json(); }
+      catch (e) { showTip('无法连接语音服务'); return; }
+      // 快速点按：松手发生在开始完成之前 → 立即停止，识别到多少算多少
+      if (pendingStop) {
+        try {
+          const t = await (await api('/speech/stop')).json();
+          if (t.ok && t.text && t.text.trim()) injectSpeech(t.text.trim());
+        } catch (e) { /* channel down */ }
+        return;
+      }
+      if (!r.ok) { showTip(r.error || '无法开始识别'); return; }
+      listening = true;
+      mic.classList.add('live');
+    }
+    async function endListen() {
+      if (!listening) { pendingStop = true; return; }
+      listening = false;
+      mic.classList.remove('live');
+      showTip('正在识别…', 60000);
+      let t;
+      try { t = await (await api('/speech/stop')).json(); }
+      catch (e) { showTip('识别失败'); return; }
+      if (t.ok && t.text && t.text.trim()) {
+        injectSpeech(t.text.trim()) ? showTip('已输入到对话框') : showTip('未找到输入框');
+      } else if (!t.ok) {
+        showTip(t.error || '识别失败');
+      } else {
+        showTip('没有听清，请再试一次');
+      }
+    }
+    mic.addEventListener('mousedown', (e) => { e.preventDefault(); beginListen(); });
+    // mouseleave + document mouseup 双保险：按住时拖出按钮/在按钮外松开都能结束
+    mic.addEventListener('mouseup', endListen);
+    mic.addEventListener('mouseleave', endListen);
+    document.addEventListener('mouseup', endListen);
+  }
+
   function init() {
     buildTitlebar();
     installChromeStyle();
-    if (onDsh) { buildPanel(); applyState(); installSettingsPageStyle(); }
+    if (onDsh) { buildPanel(); buildSpeechButton(); applyState(); installSettingsPageStyle(); }
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);

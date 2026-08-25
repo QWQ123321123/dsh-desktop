@@ -1,6 +1,6 @@
 [package]
 name = "dsh-desktop-shell-tauri"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2021"
 description = "Tauri 2 shell for DeepSeek Harness over loopback HTTP"
 
@@ -16,4 +16,18 @@ tauri = { version = "2", features = ["tray-icon"] }
 base64 = "0.22"
 rfd = "0.15"
 getrandom = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = "2.12"
+sha2 = "0.10"
+# WinRT bindings for Windows.Media.SpeechRecognition (按住说话语音输入).
+# Coexists with windows-sys (Win32 subset only); generated per feature.
+windows = { version = "0.61", features = [
+    "Foundation",
+    "Media_SpeechRecognition",
+    "Win32_System_Com",
+] }
+# Async operation types returned by the WinRT APIs above; the windows crate
+# does not re-export them, so speech.rs names the crate directly.
+windows-future = "0.2"
 windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }

@@ -28,6 +28,9 @@ const PORT_LAST: u16 = 3186;
 /// server range; the listener dies with the process, so no stale locks.
 const LOCK_PORT: u16 = PORT_FIRST - 1;
 
+mod updater;
+mod speech;
+
 static QUITTING: AtomicBool = AtomicBool::new(false);
 
 /// Random token gating the 3175 control channel. Only the injected page
@@ -461,6 +464,11 @@ fn serve_control(
                             None => "{\"url\":null}".into(),
                         }
                     }
+                    // Hold-to-talk speech input (src/speech.rs): WinRT
+                    // continuous recognition, text returned on stop.
+                    "/speech/start" => speech::start(),
+                    "/speech/stop" => speech::stop(),
+                    "/speech/status" => speech::status(),
                     // Window chrome controls for the in-page titlebar
                     // (frameless window: drag/min/max/close ride this channel).
                     p if p.starts_with("/win/") => {
@@ -468,30 +476,39 @@ fn serve_control(
                         match p {
                             "/win/drag" => {
                                 if let Some(w) = &win { let _ = w.start_dragging(); }
+                                "{\"ok\":true}".into()
                             }
                             "/win/min" => {
                                 if let Some(w) = &win { let _ = w.minimize(); }
+                                "{\"ok\":true}".into()
                             }
                             "/win/max" => {
                                 if let Some(w) = &win {
                                     if w.is_maximized().unwrap_or(false) { let _ = w.unmaximize(); }
                                     else { let _ = w.maximize(); }
                                 }
+                                "{\"ok\":true}".into()
                             }
                             "/win/fullscreen" => {
                                 // intentionally unsupported on the frameless
                                 // window: set_fullscreen swaps in WS_POPUP and
                                 // the restore path breaks border resizing.
+                                "{\"ok\":true}".into()
                             }
                             "/win/devtools" => {
                                 #[cfg(debug_assertions)]
                                 if let Some(w) = &win { w.open_devtools(); }
+                                "{\"ok\":true}".into()
                             }
                             // close hides to tray (same semantics as the window X)
                             "/win/close" => {
                                 if let Some(w) = &win { let _ = w.hide(); }
+                                "{\"ok\":true}".into()
                             }
-                            "/win/quit" => app.exit(0),
+                            "/win/quit" => {
+                                app.exit(0);
+                                "{\"ok\":true}".into()
+                            }
                             "/win/about" => {
                                 let ver = app.package_info().version.to_string();
                                 rfd::MessageDialog::new()
@@ -500,10 +517,18 @@ fn serve_control(
                                         "DeepSeek Harness 桌面客户端\nTauri 2 壳 + dsh web 后端\n版本 {ver}"
                                     ))
                                     .show();
+                                "{\"ok\":true}".into()
                             }
-                            _ => {}
+                            // Self-update flow (src/updater.rs): check the
+                            // GitHub Releases API, download + verify the
+                            // installer, then hand off and exit.
+                            "/win/update/check" => updater::handle_check(&app),
+                            "/win/update/start" => updater::handle_start(),
+                            "/win/update/status" => updater::handle_status(),
+                            "/win/update/install" => updater::handle_install(&app),
+                            "/win/update/open" => updater::handle_open(),
+                            _ => "{\"ok\":true}".into(),
                         }
-                        "{\"ok\":true}".into()
                     }
                     _ => "{\"ok\":false}".into(),
                 };
@@ -557,9 +582,10 @@ pub fn run() {
             let show = MenuItemBuilder::with_id("show", "显示 DeepSeek Harness").build(app)?;
             let bg = MenuItemBuilder::with_id("bg", "设置背景…").build(app)?;
             let bg_clear = MenuItemBuilder::with_id("bg_clear", "清除背景").build(app)?;
+            let update = MenuItemBuilder::with_id("update", "检查更新…").build(app)?;
             let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
             let menu = MenuBuilder::new(app)
-                .items(&[&show, &bg, &bg_clear, &quit])
+                .items(&[&show, &bg, &bg_clear, &update, &quit])
                 .build()?;
             TrayIconBuilder::with_id("main")
                 .tooltip("DeepSeek Harness")
@@ -579,6 +605,18 @@ pub fn run() {
                     "bg_clear" => {
                         clear_background_file();
                         reload_page_background(app);
+                    }
+                    // The update dialog lives in the page script; the tray
+                    // item just asks the page to open it.
+                    "update" => {
+                        let app = app.clone();
+                        std::thread::spawn(move || {
+                            if let Some(win) = app.get_webview_window("main") {
+                                let _ = win.eval(
+                                    "window.__dshCheckUpdate && window.__dshCheckUpdate()",
+                                );
+                            }
+                        });
                     }
                     "quit" => app.exit(0),
                     _ => {}

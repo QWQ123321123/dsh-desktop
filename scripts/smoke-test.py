@@ -132,7 +132,9 @@ def test_control_channel_gated():
     try:
         ready = wait_ready()
         check(ready is not None, "dsh 后端就绪", f"port={ready}")
-        for path in ["/win/quit", "/win/state", "/bg/state", "/bg/opacity?v=0.3", "/win/min"]:
+        for path in ["/win/quit", "/win/state", "/bg/state", "/bg/opacity?v=0.3", "/win/min",
+                     "/win/update/check", "/win/update/start", "/win/update/status", "/win/update/install",
+                     "/speech/start", "/speech/stop", "/speech/status"]:
             code = http_code(CONTROL_PORT, path)
             check(code == 403, f"GET {path} 无 token → 403", f"got {code}")
         time.sleep(2)

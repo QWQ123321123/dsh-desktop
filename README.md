@@ -91,7 +91,7 @@ dsh 处于开发者预览期，不承诺兼容；升级前看一眼其 [BREAKING
 
 ## 自动化冒烟测试
 
-`scripts/smoke-test.py` 把 13.2 验收清单中可无头自动化的部分固化为一键回归，覆盖：控制通道 token 门禁（无 token 全 403）、端口退让、端口全占失败路径、单实例握手、锁端口被无关程序占用时拒绝启动、退出无孤儿进程、退出后立即重启。
+`scripts/smoke-test.py` 把 13.2 验收清单中可无头自动化的部分固化为一键回归，覆盖：控制通道 token 门禁（无 token 全 403，含更新端点）、端口退让、端口全占失败路径、单实例握手、锁端口被无关程序占用时拒绝启动、退出无孤儿进程、退出后立即重启。
 
 ```sh
 cd src-tauri && cargo build        # 先构建 dev exe（或 npm run dev 一次）
@@ -100,7 +100,29 @@ cd .. && python scripts/smoke-test.py
 
 前置条件：工作区已 `npm install`（`node_modules/@deepseek-ai/dsh` 存在）、没有正在运行的应用实例（脚本会前置检查 3175/3176 端口并明确报错）。测试期间应用窗口会短暂弹出数次；脚本只调用只读端点，不写背景/凭证数据（dev/release 共用 DSH_HOME 的已知坑 #13 依旧存在）。
 
-不覆盖的手工项：splash 视觉跳转、背景选择对话框、右键菜单行为、关于对话框、>10MB 背景流畅度、覆盖安装/卸载（仍走 13.2 清单）。
+不覆盖的手工项：splash 视觉跳转、背景选择对话框、右键菜单行为、关于对话框、>10MB 背景流畅度、覆盖安装/卸载（仍走 13.2 清单）。更新器的下载/校验/版本比较逻辑在 `src-tauri` 里用 `cargo test` 覆盖（本地 mock HTTP 源，不依赖网络）。
+
+## 自动更新
+
+帮助 → 检查更新…（或托盘菜单同名项）触发；无需改动 release 流程，更新源就是本仓库的 GitHub Releases：
+
+1. **检查**：查 `api.github.com/repos/QWQ123321123/dsh-desktop/releases`，取最新带 setup 安装资产的 release，与当前版本做逐段数字比较（x.y.z）。
+2. **下载**：后台线程下载 NSIS 安装器到 `%APPDATA%\dsh-desktop-shell-tauri\updates\`，用 GitHub API 每个资产自带的 `digest`（sha256）校验——应用没有代码签名证书，这是防篡改边界（Windows 仍可能弹 SmartScreen，属已知限制）。
+3. **安装**：spawn 安装器 `/S` 静默安装后壳退出（退出释放主 exe 文件锁；NSIS 预装钩子负责杀 dsh sidecar），装完需手动重新打开。
+
+- 更新源 API 基址可用环境变量 `DSH_UPDATE_API_BASE` 覆盖（镜像或测试）。
+- 断网/失败时有"打开下载页"兜底（打开对应 release 的 GitHub 页面）。
+- 版本比较与下载校验的单元测试：`cd src-tauri && cargo test`。
+
+## 语音输入（按住说话）
+
+聊天页右下角的 🎤 悬浮按钮：按住开始听，松开把识别文本插入输入框。
+
+- 走 Windows 系统自带的 WinRT 连续听写（`Windows.Media.SpeechRecognition`），**完全离线、无 API key**，识别语言跟随系统语音包。
+- 识别会话由专用工作线程持有（自初始化 COM、收到停止标志后在同一线程拆会话），页面刷新/松开丢失也不会漏开麦克风；重复按住会先拆旧会话。
+- 控制通道 `/speech/start|stop|status`；`stop` 返回累计文本，由 shell-panel.js 注入 dsh 的受控 textarea（native setter + input 事件）或 contenteditable（`execCommand('insertText')`）。
+- 前置条件：系统设置 → 隐私 → 麦克风 →"允许桌面应用访问麦克风"已开启；语言栏装有与识别语言匹配的语音包（一般中文/英文输入法自带）。未满足时 `/speech/start` 返回明确错误文案。
+- 已知限制：WebView2 不支持 Web Speech API，所以没有走浏览器方案；Windows 11 24H2 起可用系统级"按住说话"唤起（与本功能无关，纯系统行为）。
 
 ### 壳与 dsh DOM 的耦合点（dsh 改版面时优先检查）
 
@@ -113,7 +135,9 @@ cd .. && python scripts/smoke-test.py
 
 ```
 src-tauri/            Rust 壳（src/lib.rs 是全部主逻辑）
-  assets/shell-panel.js  注入页面的 UI 脚本（标题栏/菜单/背景面板；编译期注入，node --check 校验）
+  src/updater.rs      自实现更新器（GitHub API 检查 + SHA-256 校验下载 + 静默安装）
+  src/speech.rs       语音输入（WinRT 连续听写，按住说话）
+  assets/shell-panel.js  注入页面的 UI 脚本（标题栏/菜单/背景面板/更新弹窗/语音按钮；编译期注入，node --check 校验）
   resources/          打包资源（node 运行时 + dsh 依赖树，不入库）
   nsis-hooks.nsh      安装器装前/卸前杀 sidecar
 assets/               DeepSeek logo SVG
