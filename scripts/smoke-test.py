@@ -134,7 +134,9 @@ def test_control_channel_gated():
         check(ready is not None, "dsh 后端就绪", f"port={ready}")
         for path in ["/win/quit", "/win/state", "/bg/state", "/bg/opacity?v=0.3", "/win/min",
                      "/win/update/check", "/win/update/start", "/win/update/status", "/win/update/install",
-                     "/speech/start", "/speech/stop", "/speech/status"]:
+                     "/speech/start", "/speech/stop", "/speech/status",
+                     "/plugin/list", "/plugin/catalog", "/plugin/status",
+                     "/plugin/install?pkg=lodash", "/plugin/remove?pkg=lodash", "/plugin/ensure-pnpm"]:
             code = http_code(CONTROL_PORT, path)
             check(code == 403, f"GET {path} 无 token → 403", f"got {code}")
         time.sleep(2)

@@ -44,6 +44,7 @@
       // 会导致边框缩放失效；最大化已覆盖该场景。
     ]},
     { label: '帮助', items: [
+      { label: '插件市场…', act: () => pluginMarket() },
       { label: '检查更新…', act: () => updateFlow() },
       '-',
       { label: '关于 DeepSeek Harness', act: () => cmd('/win/about') },
@@ -431,6 +432,237 @@
     });
   }
   window.__dshCheckUpdate = updateFlow;
+
+  // ---------------- 插件市场（帮助 → 插件市场） ----------------
+  // 目录由 GitHub 仓库根目录的 catalog.json 托管（Rust 侧拉取 + 缓存）；
+  // 安装/卸载/装 pnpm 都是 /plugin/* 后台任务（dsh plugin = pnpm 转发器，
+  // 可能要跑几分钟）。装完/卸完需重启应用生效（/win/restart）。
+  let marketHost = null;
+  function showMarket(html, buttons) {
+    if (!marketHost) {
+      marketHost = document.createElement('div');
+      marketHost.id = 'dsh-shell-market';
+      document.documentElement.appendChild(marketHost);
+    }
+    const shadow = marketHost.shadowRoot || marketHost.attachShadow({ mode: 'open' });
+    const btnHtml = buttons.map(b => `<button class="b${b.primary ? ' primary' : ''}" data-b="${b.id}">${b.label}</button>`).join('');
+    shadow.innerHTML = `
+      <style>
+        .mask { position:fixed; inset:0; z-index:2147483647; display:flex; align-items:center; justify-content:center;
+                background:rgba(0,0,0,.35); font:13px/1.6 "Segoe UI","Microsoft YaHei",sans-serif;
+                color: light-dark(#1f2328,#e8eaed); }
+        .card { width:660px; max-width:calc(100vw - 48px); max-height:82vh; display:flex; flex-direction:column;
+                border-radius:12px; padding:18px 20px; background: light-dark(#fff,#2a2a2d);
+                box-shadow:0 8px 32px rgba(0,0,0,.35); animation: dshPopIn .18s ease-out; }
+        .body { overflow:auto; flex:1; min-height:0; }
+        .t { font-size:15px; font-weight:600; margin-bottom:6px; }
+        .meta { font-size:12px; opacity:.7; margin-bottom:6px; }
+        .sec h3 { font-size:12px; opacity:.6; font-weight:600; margin:12px 0 6px;
+                  text-transform:uppercase; letter-spacing:.04em; }
+        .row { display:flex; align-items:center; gap:8px; padding:7px 10px; border:1px solid light-dark(#e4e7ec,#3a3d44);
+               border-radius:8px; margin-bottom:6px; }
+        .row .nm { font-weight:600; }
+        .row .ver { font-size:11px; opacity:.6; white-space:nowrap; }
+        .row .desc { flex:1; font-size:12px; opacity:.8; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .row .by { font-size:11px; opacity:.5; white-space:nowrap; }
+        .warn { font-size:12px; padding:7px 10px; border-radius:8px; margin-bottom:8px;
+                border:1px solid #d9a13b; background:light-dark(#fdf6e7,#3d3524); color:light-dark(#7a5600,#f0c674); }
+        .out { font-family:Consolas,monospace; font-size:11px; line-height:1.5; white-space:pre-wrap; word-break:break-all;
+               max-height:150px; overflow:auto; background:light-dark(#f6f8fa,#1f2124);
+               border:1px solid light-dark(#dde1e7,#3a3d44); border-radius:8px; padding:8px 10px; margin:8px 0; }
+        input.inp { flex:1; padding:6px 10px; border-radius:7px; border:1px solid light-dark(#dde1e7,#44464c);
+                    background:light-dark(#f7f8fa,#1f2124); color:inherit; font-size:13px; outline:none; }
+        input.inp:focus { border-color:#4d7dfe; }
+        .btns { display:flex; justify-content:flex-end; gap:8px; margin-top:12px; }
+        button.b { padding:6px 14px; border-radius:7px; border:1px solid light-dark(#dde1e7,#44464c);
+                   background: light-dark(#f7f8fa,#3a3d44); cursor:pointer; font-size:13px;
+                   color: inherit; transition: background .12s ease, transform .08s ease; }
+        button.b:hover { background: light-dark(#eef1f6,#484b54); }
+        button.b:active { transform: scale(.97); }
+        button.b.primary { background:#4d7dfe; border-color:#4d7dfe; color:#fff; }
+        button.b.primary:hover { background:#3f6ce8; }
+        button.b.danger { border-color:#e81123; color:#e81123; }
+        button.b.small { padding:3px 10px; font-size:12px; }
+      </style>
+      <div class="mask"><div class="card"><div class="body">${html}</div><div class="btns">${btnHtml}</div></div></div>`;
+    for (const b of buttons) {
+      shadow.querySelector(`[data-b="${b.id}"]`).onclick = () => b.act(shadow);
+    }
+    return shadow;
+  }
+  function closeMarket() { marketHost?.remove(); marketHost = null; }
+
+  async function pluginMarket() {
+    showMarket(`<div class="t">插件市场</div><div class="meta">加载中…</div>`,
+      [{ id: 'ok', label: '关闭', act: () => closeMarket() }]);
+    const [lst, cat] = await Promise.all([
+      api('/plugin/list').then(r => r.json()).catch(() => null),
+      api('/plugin/catalog').then(r => r.json()).catch(() => null),
+    ]);
+    renderMarket(lst, cat);
+  }
+
+  function renderMarket(lst, cat) {
+    const shadow = showMarket(marketBody(lst, cat), [
+      { id: 'refresh', label: '刷新', act: () => pluginMarket() },
+      { id: 'ok', label: '关闭', act: () => closeMarket() },
+    ]);
+    const pnpmBtn = shadow.querySelector('#market-pnpm');
+    if (pnpmBtn) pnpmBtn.onclick = () => ensurePnpm();
+    const search = shadow.querySelector('#market-search');
+    if (search) {
+      search.oninput = () => {
+        const q = search.value.trim().toLowerCase();
+        shadow.querySelectorAll('.catrow').forEach(row => {
+          row.style.display = (row.dataset.q || '').includes(q) ? '' : 'none';
+        });
+      };
+    }
+    const addBtn = shadow.querySelector('#market-add-btn');
+    const addInp = shadow.querySelector('#market-add-inp');
+    if (addBtn && addInp) {
+      addBtn.onclick = () => {
+        const name = addInp.value.trim();
+        if (name) confirmPlugin(name, null);
+      };
+      addInp.onkeydown = e => { if (e.key === 'Enter' && addInp.value.trim()) confirmPlugin(addInp.value.trim(), null); };
+    }
+    shadow.querySelectorAll('[data-install]').forEach(b => {
+      b.onclick = () => confirmPlugin(b.dataset.install, b.dataset.trusted === '1' ? b.dataset.entry : null);
+    });
+    shadow.querySelectorAll('[data-remove]').forEach(b => {
+      b.onclick = () => confirmRemove(b.dataset.remove);
+    });
+  }
+
+  function marketBody(lst, cat) {
+    const pnpm = !!(lst && lst.ok && lst.pnpm);
+    const installed = (lst && lst.ok && lst.plugins) ? lst.plugins : [];
+    const installedNames = new Set(installed.map(p => p.name));
+    const entries = (cat && cat.ok && cat.plugins) ? cat.plugins : [];
+    let html = `<div class="t">插件市场</div>`;
+    if (lst && !lst.ok) html += `<div class="warn">已安装列表加载失败：${esc(lst.error || '')}</div>`;
+    if (!pnpm) {
+      html += `<div class="warn">未检测到 pnpm —— dsh 的插件管理依赖它（pnpm add/remove 转发）。
+               <button class="b small" id="market-pnpm" style="margin-left:6px">一键安装 pnpm</button></div>`;
+    }
+    html += `<div class="sec"><h3>已安装（${installed.length}）</h3>`;
+    if (installed.length === 0) html += `<div class="meta">尚未安装插件</div>`;
+    for (const p of installed) {
+      html += `<div class="row"><span class="nm">${esc(p.name)}</span><span class="ver">${esc(p.version)}</span>
+        <span class="desc"></span><button class="b small danger" data-remove="${esc(p.name)}">卸载</button></div>`;
+    }
+    html += `</div>`;
+    html += `<div class="sec"><h3>官方目录（${entries.length}）</h3>`;
+    if (cat && !cat.ok) html += `<div class="warn">目录加载失败：${esc(cat.error || '')}</div>`;
+    if (entries.length === 0) {
+      html += `<div class="meta">目录暂无收录。可用下方「按包名安装」，或向目录仓库提交收录（catalog.json）。</div>`;
+    } else {
+      html += `<input class="inp" id="market-search" placeholder="搜索目录…" style="margin-bottom:8px">`;
+      for (const e of entries) {
+        const isInstalled = installedNames.has(e.name);
+        html += `<div class="row catrow" data-q="${esc((e.name + ' ' + e.title + ' ' + e.author).toLowerCase())}">
+          <span class="nm">${esc(e.title || e.name)}</span>
+          <span class="ver">${e.version ? 'v' + esc(e.version) : ''}${e.dsh ? ' · dsh ' + esc(e.dsh) : ''}</span>
+          <span class="desc">${esc(e.description || '')}</span>
+          <span class="by">${esc(e.author || '')}</span>
+          ${isInstalled ? '<span class="ver">已安装</span>'
+            : `<button class="b small primary" data-install="${esc(e.name)}" data-trusted="1"
+                 data-entry="${esc(JSON.stringify(e))}">安装</button>`}
+        </div>`;
+      }
+    }
+    html += `</div>`;
+    html += `<div class="sec"><h3>按包名安装</h3>
+      <div style="display:flex; gap:8px; align-items:center">
+        <input class="inp" id="market-add-inp" placeholder="npm 包名，如 @scope/plugin-name">
+        <button class="b" id="market-add-btn">安装</button>
+      </div>
+      <div class="meta" style="margin-top:6px">未收录的包来源未经验证，安装前会再次确认；仅接受 npm 注册表包名。</div>
+    </div>`;
+    return html;
+  }
+
+  function confirmPlugin(name, entry) {
+    let info = `<div class="meta">安装来源：npm 注册表（pnpm add ${esc(name)}），安装后需重启应用生效。</div>`;
+    if (entry) {
+      info = `<div class="meta">${esc(entry.title || entry.name)}${entry.author ? ' · ' + esc(entry.author) : ''}${entry.version ? ' · v' + esc(entry.version) : ''}${entry.repo ? ' · ' + esc(entry.repo) : ''}</div>` +
+             (entry.description ? `<div class="meta">${esc(entry.description)}</div>` : '') +
+             `<div class="meta">已收录插件：安装前可对照目录信息确认来源。安装后需重启应用生效。</div>`;
+    } else {
+      info = `<div class="warn">${esc(name)} 不在官方目录中，来源未经验证。插件安装时会执行其安装脚本（等同运行任意代码），请确认来自可信来源。</div>` + info;
+    }
+    showMarket(`<div class="t">安装插件 ${esc(name)}</div>${info}`,
+      [{ id: 'go', label: '确认安装', primary: true, act: () => startPluginJob('install', name) },
+       { id: 'back', label: '返回', act: () => pluginMarket() },
+       { id: 'ok', label: '关闭', act: () => closeMarket() }]);
+  }
+
+  function confirmRemove(name) {
+    showMarket(`<div class="t">卸载插件 ${esc(name)}</div><div class="meta">卸载后需重启应用生效。</div>`,
+      [{ id: 'go', label: '确认卸载', primary: true, act: () => startPluginJob('remove', name) },
+       { id: 'back', label: '返回', act: () => pluginMarket() },
+       { id: 'ok', label: '关闭', act: () => closeMarket() }]);
+  }
+
+  function jobLabel(kind) {
+    return kind === 'install' ? '安装' : kind === 'remove' ? '卸载' : '安装 pnpm';
+  }
+
+  async function ensurePnpm() {
+    showMarket(`<div class="t">正在安装 pnpm…</div><div class="meta">执行 npm install -g pnpm（全局安装，需要网络）</div><div class="out"></div>`,
+      [{ id: 'ok', label: '后台继续', act: () => closeMarket() }]);
+    try { await (await api('/plugin/ensure-pnpm')).json(); } catch (e) { /* poll surfaces */ }
+    await pollPluginJob();
+  }
+
+  async function startPluginJob(kind, name) {
+    showMarket(`<div class="t">${jobLabel(kind)}中… ${esc(name)}</div><div class="out"></div>`,
+      [{ id: 'ok', label: '后台继续', act: () => closeMarket() }]);
+    const ep = kind === 'install' ? '/plugin/install' : '/plugin/remove';
+    try { await (await api(ep + '?pkg=' + encodeURIComponent(name))).json(); } catch (e) { /* poll surfaces */ }
+    await pollPluginJob();
+  }
+
+  function pollPluginJob() {
+    return new Promise(resolve => {
+      const poll = setInterval(async () => {
+        let r;
+        try { r = await (await api('/plugin/status')).json(); } catch (e) { return; }
+        if (!r || !r.ok) return;
+        const job = r.job;
+        if (!job) { clearInterval(poll); resolve(); return; }
+        const out = job.output ? `<div class="out">${esc(job.output)}</div>` : '';
+        if (job.state === 'running') {
+          showMarket(`<div class="t">${jobLabel(job.kind)}中… ${esc(job.pkg || '')}</div>${out}`,
+            [{ id: 'ok', label: '后台继续', act: () => closeMarket() }]);
+        } else if (job.state === 'done') {
+          clearInterval(poll);
+          const needRestart = job.kind === 'install' || job.kind === 'remove';
+          showMarket(`<div class="t">${jobLabel(job.kind)}完成</div>` +
+            `<div class="meta">${esc(job.pkg || '')}${needRestart ? ' · 重启应用后生效' : ''}</div>${out}`,
+            needRestart
+              ? [{ id: 'go', label: '立即重启', primary: true, act: () => cmd('/win/restart') },
+                 { id: 'back', label: '返回市场', act: () => pluginMarket() },
+                 { id: 'ok', label: '关闭', act: () => closeMarket() }]
+              : [{ id: 'back', label: '返回市场', act: () => pluginMarket() },
+                 { id: 'ok', label: '关闭', act: () => closeMarket() }]);
+          resolve();
+        } else {
+          clearInterval(poll);
+          const pnpmMissing = /pnpm/.test(job.message || '');
+          const hint = pnpmMissing
+            ? `<div class="warn">${esc(job.message)}</div>`
+            : `<div class="meta">${esc(job.message || '未知错误')}</div>`;
+          showMarket(`<div class="t">操作失败</div>${hint}${out}`,
+            (pnpmMissing ? [{ id: 'pnpm', label: '一键安装 pnpm', act: () => ensurePnpm() }] : [])
+              .concat([{ id: 'back', label: '返回市场', act: () => pluginMarket() },
+                       { id: 'ok', label: '关闭', act: () => closeMarket() }]));
+          resolve();
+        }
+      }, 600);
+    });
+  }
 
   // ---------------- 语音输入（按住说话，仅 dsh 页面） ----------------
   // 按住 🎤 → /speech/start（WinRT 连续识别）；松开 → /speech/stop 取文本，

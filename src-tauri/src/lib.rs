@@ -30,6 +30,7 @@ const LOCK_PORT: u16 = PORT_FIRST - 1;
 
 mod updater;
 mod speech;
+mod plugins;
 
 static QUITTING: AtomicBool = AtomicBool::new(false);
 
@@ -152,6 +153,14 @@ fn pick_port() -> (TcpListener, u16) {
         }
     }
     panic!("no free port in {PORT_FIRST}..={PORT_LAST}");
+}
+
+/// (node, dsh CLI entry, DSH_HOME) for sidecar CLI invocations such as
+/// `dsh plugin` (src/plugins.rs). resolve() is pure, so a fresh spec per
+/// call is fine — the boot thread holds its own copy.
+pub(crate) fn dsh_cli() -> (std::path::PathBuf, std::path::PathBuf, Option<std::path::PathBuf>) {
+    let spec = ServerSpec::resolve();
+    (spec.node, spec.bin, spec.dsh_home)
 }
 
 /// Absolute path to the dsh CLI entry inside the workspace's node_modules.
@@ -469,6 +478,15 @@ fn serve_control(
                     "/speech/start" => speech::start(),
                     "/speech/stop" => speech::stop(),
                     "/speech/status" => speech::status(),
+                    // Plugin marketplace (src/plugins.rs): list installed,
+                    // fetch the curated catalog, and run add/remove/ensure-pnpm
+                    // as background jobs (pnpm can take minutes).
+                    "/plugin/list" => plugins::handle_list(),
+                    "/plugin/catalog" => plugins::handle_catalog(),
+                    "/plugin/status" => plugins::handle_status(),
+                    "/plugin/install" => plugins::handle_start("install", query),
+                    "/plugin/remove" => plugins::handle_start("remove", query),
+                    "/plugin/ensure-pnpm" => plugins::handle_start("pnpm", query),
                     // Window chrome controls for the in-page titlebar
                     // (frameless window: drag/min/max/close ride this channel).
                     p if p.starts_with("/win/") => {
@@ -509,6 +527,9 @@ fn serve_control(
                                 app.exit(0);
                                 "{\"ok\":true}".into()
                             }
+                            // Reboot the shell (and with it the dsh child, via
+                            // the job object) so installed plugins take effect.
+                            "/win/restart" => app.restart(),
                             "/win/about" => {
                                 let ver = app.package_info().version.to_string();
                                 rfd::MessageDialog::new()

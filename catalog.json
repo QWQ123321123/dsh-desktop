@@ -1,0 +1,5 @@
+{
+  "updated": "2026-08-25",
+  "note": "插件目录：收录经过验证的 dsh 插件（npm 包，需声明 dsh.bundle）。提交 PR 修改本文件即可收录；目录内容通过 api.github.com contents API 拉取，应用内缓存 10 分钟。",
+  "plugins": []
+}
