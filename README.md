@@ -124,6 +124,17 @@ cd .. && python scripts/smoke-test.py
 - 前置条件：系统设置 → 隐私 → 麦克风 →"允许桌面应用访问麦克风"已开启；语言栏装有与识别语言匹配的语音包（一般中文/英文输入法自带）。未满足时 `/speech/start` 返回明确错误文案。
 - 已知限制：WebView2 不支持 Web Speech API，所以没有走浏览器方案；Windows 11 24H2 起可用系统级"按住说话"唤起（与本功能无关，纯系统行为）。
 
+## 插件市场（帮助 → 插件市场）
+
+管理 dsh 的 profile 插件：已安装列表、官方目录、按包名安装。
+
+- **机制**：安装/卸载直接调用上游 `dsh plugin --profile web add|remove`（pnpm 转发器，跑在 `$DSH_HOME/profiles/web`）；插件是声明 `"dsh": {"bundle": {"patch": ...}}` 的 npm 包。装完/卸完需**重启应用**生效（对话框提供"立即重启"，`/win/restart` 重启壳并连带重启 dsh 子进程）。
+- **目录**：仓库根目录 `catalog.json` 是官方收录清单（经 GitHub contents API 拉取，应用内缓存 10 分钟；可用 `DSH_CATALOG_URL` 覆盖）。收录 = 提交 PR 在 `plugins` 数组加一条（name/title/description/author/repo/version/dsh 兼容范围）。当前为空，机制先行。
+- **信任边界**：目录外按名安装会先弹"来源未验证"警告——插件安装即执行其安装脚本，等价于运行任意代码；UI 输入的包名做白名单校验（仅 npm 注册表包名，防上游 `shell: true` 转发的注入面）。
+- **前置条件**：需要 `pnpm`（dsh 插件管理依赖它）。未检测到时市场内可"一键安装 pnpm"（`npm i -g pnpm`，后台任务）。
+- 控制通道：`/plugin/list|catalog|status|install|remove|ensure-pnpm`；安装/卸载/装 pnpm 是单槽后台任务，UI 轮询 `/plugin/status`。
+- 单元测试：`cd src-tauri && cargo test`（包名白名单、pnpm list 解析、目录解析）。
+
 ### 壳与 dsh DOM 的耦合点（dsh 改版面时优先检查）
 
 - **设置整页**：`[role="dialog"][aria-modal="true"]:has(nav)` 结构选择器 + fixed 全屏覆盖（CSS Modules 类名带哈希，只能按结构匹配）
@@ -137,9 +148,11 @@ cd .. && python scripts/smoke-test.py
 src-tauri/            Rust 壳（src/lib.rs 是全部主逻辑）
   src/updater.rs      自实现更新器（GitHub API 检查 + SHA-256 校验下载 + 静默安装）
   src/speech.rs       语音输入（WinRT 连续听写，按住说话）
-  assets/shell-panel.js  注入页面的 UI 脚本（标题栏/菜单/背景面板/更新弹窗/语音按钮；编译期注入，node --check 校验）
+  src/plugins.rs      插件市场（dsh plugin/pnpm 转发 + 官方目录拉取 + 后台任务）
+  assets/shell-panel.js  注入页面的 UI 脚本（标题栏/菜单/背景面板/更新弹窗/语音按钮/插件市场；编译期注入，node --check 校验）
   resources/          打包资源（node 运行时 + dsh 依赖树，不入库）
   nsis-hooks.nsh      安装器装前/卸前杀 sidecar
+catalog.json          插件市场官方收录清单（GitHub 托管，PR 收录）
 assets/               DeepSeek logo SVG
 scripts/              gen-icons / gen-splash / prune-runtime / smoke-test / 诊断脚本
 dist/                 splash.html（构建产物，可重新生成）
