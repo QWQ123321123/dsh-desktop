@@ -251,8 +251,8 @@ fn read_profile_manifest() -> Vec<(String, String)> {
 }
 
 pub fn handle_list() -> String {
-    let mut plugins: Vec<(String, String)> = Vec::new();
-    let mut pnpm = false;
+    let mut plugins;
+    let pnpm;
     match run_bounded(&mut dsh_plugin_cmd(&["list", "--json"]), 15) {
         Some(out) if out.status.success() => {
             pnpm = true;

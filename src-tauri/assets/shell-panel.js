@@ -201,8 +201,12 @@
     }, 800);
   }
 
-  // ---------------- background panel (dsh UI origin only) ----------------
-  let panel, slider, overlay;
+  // ---------------- composer toolbar (语音 + 背景，仅 dsh 页面) ----------------
+  // 两个图标按钮作为 dsh 按钮行（发送按钮左侧）的真实兄弟节点注入：行内 flex
+  // 布局 + color:inherit 天然跟随 dsh 排版与主题；形状照抄行内按钮的计算样式，
+  // 弹层/tip 取 --dsw-alias-* 设计令牌。React 重渲染清掉节点时由
+  // MutationObserver 即时补回，600ms 周期兜底（找不到 composer 时自动隐藏）。
+  let slider, overlay, toolbarUi = null;
   async function applyState() {
     try {
       const s = await (await api('/bg/state')).json();
@@ -218,49 +222,226 @@
     } catch (e) { /* shell control channel down: stay silent */ }
   }
   window.__dshBgReload = applyState;
-  function buildPanel() {
-    if (document.getElementById('dsh-shell-bg-panel')) return;
+  function buildComposerToolbar() {
+    if (toolbarUi || !onDsh) return;
     const host = document.createElement('div');
-    host.id = 'dsh-shell-bg-panel';
-    host.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;';
+    host.id = 'dsh-shell-toolbar';
+    host.style.cssText = 'position:fixed;left:0;top:0;z-index:2147483647;';
     const shadow = host.attachShadow({ mode: 'open' });
     shadow.innerHTML = `
       <style>
-        /* light-dark() follows dsh's own theme toggle: dsh sets
-           color-scheme on the root element, which inherits into shadow DOM. */
-        .fab { width:36px;height:36px;border-radius:50%;border:1px solid light-dark(#dde1e7,#44464c);
-               background: light-dark(#fff,#2a2a2d);
-               cursor:pointer;font-size:16px;line-height:1;box-shadow:0 2px 8px rgba(0,0,0,.12); }
-        .pop { display:none;position:absolute;bottom:44px;right:0;
-               background: light-dark(#fff,#2a2a2d);border:1px solid light-dark(#dde1e7,#44464c);
-               border-radius:10px;padding:12px;width:190px;box-shadow:0 4px 16px rgba(0,0,0,.15);
-               font:12px/1.6 "Segoe UI","Microsoft YaHei",sans-serif;color: light-dark(#1f2328,#e8eaed); }
+        /* 弹层/tip 取色：--tb-* 由 JS 从 dsh 设计令牌（--dsw-alias-*）刷新，
+           令牌读不到时退回 light-dark() 主题色 */
+        .pop { display:none; position:fixed; width:190px; padding:12px; border-radius:10px; font-size:12px; line-height:1.6;
+               background: var(--tb-bg, light-dark(#fff,#2a2a2d));
+               border:1px solid var(--tb-bd, light-dark(#dde1e7,#44464c));
+               box-shadow:0 4px 16px rgba(0,0,0,.15);
+               color: var(--tb-fg, light-dark(#1f2328,#e8eaed));
+               animation: tPop .16s ease-out; }
         .pop.open { display:block; }
-        button.act { width:100%;margin:2px 0;padding:5px 8px;border:1px solid light-dark(#dde1e7,#44464c);
-                     border-radius:6px;background: light-dark(#f7f8fa,#3a3d44);cursor:pointer;font-size:12px;
-                     color: light-dark(#1f2328,#e8eaed); transition: background .12s ease, transform .08s ease; }
-        button.act:hover { background: light-dark(#eef1f6,#484b54); }
+        @keyframes tPop { from { opacity:0; transform: translateY(6px) scale(.96); }
+                          to { opacity:1; transform:none; } }
+        .tip { display:none; position:fixed; max-width:280px; padding:4px 10px; border-radius:6px;
+               font:12px/1.5 var(--tb-ff, "Segoe UI","Microsoft YaHei",sans-serif); text-align:center;
+               background: var(--tb-bg, light-dark(#fff,#2a2a2d));
+               border:1px solid var(--tb-bd, light-dark(#dde1e7,#44464c));
+               box-shadow:0 2px 10px rgba(0,0,0,.18);
+               color: var(--tb-fg, light-dark(#1f2328,#e8eaed)); }
+        .tip.show { display:block; }
+        button.act { width:100%; margin:2px 0; padding:5px 8px; cursor:pointer; font-size:12px;
+                     border:1px solid var(--tb-bd, light-dark(#dde1e7,#44464c)); border-radius:6px;
+                     background:transparent; color:inherit;
+                     transition: background .12s ease, transform .08s ease; }
+        button.act:hover { background: color-mix(in srgb, currentColor 8%, transparent); }
         button.act:active { transform: scale(.97); }
-        .fab { transition: transform .12s ease, box-shadow .12s ease; }
-        .fab:hover { transform: scale(1.08); box-shadow:0 4px 12px rgba(0,0,0,.2); }
-        .fab:active { transform: scale(.94); }
-        .pop { animation: dshPopIn .16s ease-out; }
-        @keyframes dshPopIn { from { opacity: 0; transform: translateY(6px) scale(.96); } to { opacity: 1; transform: none; } }
-        input[type=range] { width:100%;margin-top:6px; }
-        .row { margin-top:8px;color: light-dark(#8a919c,#9aa0a8); }
+        input[type=range] { width:100%; margin-top:6px; accent-color:#4d7dfe; }
+        .row { margin-top:8px; opacity:.7; }
       </style>
-      <button class="fab" title="背景设置">🎨</button>
-      <div class="pop">
+      <div class="pop" id="pop">
         <button class="act" id="pick">选择背景图片…</button>
         <button class="act" id="clear">清除背景</button>
         <div class="row">透明度 <span id="val"></span>%</div>
         <input type="range" id="op" min="2" max="60" value="18">
-      </div>`;
+      </div>
+      <div class="tip" id="tip"></div>`;
     document.documentElement.appendChild(host);
-    panel = shadow.querySelector('.pop');
+    // 两个图标按钮是 light-DOM 元素，作为 dsh 按钮行的真实兄弟节点插入
+    // （发送按钮左侧）。行内 flex 布局与 color:inherit 让它们天然跟随 dsh 的
+    // 排版和主题色；React 重渲染会清掉注入节点，用 MutationObserver 即时补回。
+    if (!document.getElementById('dsh-shell-tb-style')) {
+      const style = document.createElement('style');
+      style.id = 'dsh-shell-tb-style';
+      style.textContent = `
+        .dsh-tb-btn { display:inline-flex; align-items:center; justify-content:center; flex:none;
+                      width:24px; padding:0; border:none; cursor:pointer; background:transparent;
+                      color:inherit; height:var(--dsh-tb-h, 28px);
+                      border-radius:var(--dsh-tb-r, 6px);
+                      transition: background .12s ease, transform .08s ease; }
+        .dsh-tb-btn:hover { background: color-mix(in srgb, currentColor 12%, transparent); }
+        .dsh-tb-btn:active { transform: scale(.9); }
+        .dsh-tb-btn svg { width:14px; height:14px; fill:currentColor; }
+        .dsh-tb-btn.live { background: var(--dsh-tb-brand, #4d7dfe); color:#fff;
+                           animation: dshTbPulse 1.2s ease-in-out infinite; }
+        @keyframes dshTbPulse { 0%,100% { box-shadow:0 0 0 0 rgba(77,125,254,.45); }
+                                50% { box-shadow:0 0 0 8px rgba(77,125,254,0); } }
+      `;
+      document.documentElement.appendChild(style);
+    }
+    const bgBtn = document.createElement('button');
+    bgBtn.className = 'dsh-tb-btn';
+    bgBtn.title = '背景设置';
+    bgBtn.setAttribute('aria-label', '背景设置');
+    bgBtn.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>`;
+    const micBtn = document.createElement('button');
+    micBtn.className = 'dsh-tb-btn';
+    micBtn.title = '语音输入（按住说话）';
+    micBtn.setAttribute('aria-label', '语音输入（按住说话）');
+    micBtn.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.91-3c-.49 0-.9.36-.98.85C16.52 14.2 14.47 16 12 16s-4.52-1.8-4.93-4.15c-.08-.49-.49-.85-.98-.85-.61 0-1.09.54-1 1.14.49 3 2.89 5.35 5.91 5.78V20c0 .55.45 1 1 1s1-.45 1-1v-2.08c3.02-.43 5.42-2.78 5.91-5.78.1-.6-.39-1.14-1-1.14z"/></svg>`;
+    // 定位 dsh 的 composer 根：从 textarea 向上找最近含 _primary（发送）按钮的
+    // 容器（CSS Modules 类名带哈希，按后缀匹配；README 已记录这类结构耦合）。
+    const locateRow = () => {
+      const ta = findComposer();
+      let el = ta;
+      while (el && el !== document.body) {
+        const primary = el.querySelector('button[class$="_primary"]');
+        if (primary) return { root: el, row: primary.parentElement, primaryBtn: primary };
+        el = el.parentElement;
+      }
+      return null;
+    };
+    const placeButtons = (loc) => {
+      if (!loc.row.contains(bgBtn)) loc.row.insertBefore(bgBtn, loc.primaryBtn);
+      if (!loc.row.contains(micBtn)) loc.row.insertBefore(micBtn, loc.primaryBtn);
+      // 形状照抄 dsh 自己的行内按钮；前景色交给 color:inherit 自动跟随主题
+      const cs = getComputedStyle(loc.primaryBtn);
+      bgBtn.style.setProperty('--dsh-tb-h', cs.height);
+      bgBtn.style.setProperty('--dsh-tb-r', cs.borderRadius);
+      micBtn.style.setProperty('--dsh-tb-h', cs.height);
+      micBtn.style.setProperty('--dsh-tb-r', cs.borderRadius);
+      host.style.setProperty('--tb-ff', cs.fontFamily);
+      // 弹层取色：从 composer 根解析 dsh 设计令牌，主题切换后周期重读即跟随
+      const rs = getComputedStyle(loc.root);
+      const tk = (full, tb) => {
+        const v = rs.getPropertyValue(full).trim();
+        if (v) host.style.setProperty(tb, v);
+      };
+      tk('--dsw-alias-brand-primary', '--dsh-tb-brand');
+      tk('--dsw-alias-bg-layer-1', '--tb-bg');
+      tk('--dsw-alias-label-primary', '--tb-fg');
+      tk('--dsw-alias-border-l1', '--tb-bd');
+    };
+    const tip = shadow.getElementById('tip');
+    const pop = shadow.getElementById('pop');
     slider = shadow.getElementById('op');
     const val = shadow.getElementById('val');
-    shadow.querySelector('.fab').onclick = () => panel.classList.toggle('open');
+    const st = { listening: false, pendingStop: false, tipTimer: null };
+    toolbarUi = { host, tip, pop, mic: micBtn, st, loc: null };
+    // 弹层/tip 锚在 composer 右上角（输入框上方）
+    const reanchor = () => {
+      const ta = findComposer();
+      const r = ta && ta.getBoundingClientRect();
+      if (!r || (!r.width && !r.height)) {
+        pop.classList.remove('open');
+        tip.classList.remove('show');
+        return;
+      }
+      const anchor = (el) => {
+        el.style.left = `${Math.round(r.right - el.offsetWidth - 8)}px`;
+        el.style.top = `${Math.round(r.top - el.offsetHeight - 8)}px`;
+      };
+      if (tip.classList.contains('show')) anchor(tip);
+      if (pop.classList.contains('open')) anchor(pop);
+    };
+    window.addEventListener('scroll', reanchor, true);
+    window.addEventListener('resize', reanchor);
+    // React 重渲染会移除注入的按钮：观察 composer 根，即时补回
+    let mo = null;
+    let obsTarget = null;
+    const armObs = () => {
+      const loc = toolbarUi.loc;
+      if (!loc || obsTarget === loc.root) return;
+      if (mo) mo.disconnect();
+      obsTarget = loc.root;
+      mo = new MutationObserver(() => {
+        const l = locateRow();
+        if (!l) return;
+        toolbarUi.loc = l;
+        placeButtons(l);
+      });
+      mo.observe(loc.root, { childList: true, subtree: true });
+    };
+    // 周期兜底：定位失败重试 / 主题令牌刷新 / 弹层跟随布局
+    setInterval(() => {
+      const loc = locateRow();
+      if (loc) {
+        toolbarUi.loc = loc;
+        placeButtons(loc);
+        armObs();
+      }
+      reanchor();
+    }, 600);
+    // ---- 语音：按住开始 / 松开取文本 ----
+    const showTip = (msg, ms = 2500) => {
+      tip.textContent = msg;
+      tip.classList.add('show');
+      clearTimeout(st.tipTimer);
+      st.tipTimer = setTimeout(() => tip.classList.remove('show'), ms);
+      reanchor();
+    };
+    async function beginListen() {
+      if (st.listening) return;
+      st.pendingStop = false;
+      let r;
+      try { r = await (await api('/speech/start')).json(); }
+      catch (e) { showTip('无法连接语音服务'); return; }
+      // 快速点按：松手发生在开始完成之前 → 立即停止，识别到多少算多少
+      if (st.pendingStop) {
+        try {
+          const t = await (await api('/speech/stop')).json();
+          if (t.ok && t.text && t.text.trim()) injectSpeech(t.text.trim());
+        } catch (e) { /* channel down */ }
+        return;
+      }
+      if (!r.ok) { showTip(r.error || '无法开始识别'); return; }
+      if (r.mic_mismatch) {
+        // 识别器固定用系统“默认通信设备”的麦克风，与平时常用的默认输入
+        // 设备不同（例如蓝牙耳机不在通话模式时麦克风静音），提示一次即可。
+        showTip('提示：语音识别使用系统的默认通信设备麦克风，若听不到声音请在 Windows 声音设置中检查');
+      }
+      st.listening = true;
+      micBtn.classList.add('live');
+    }
+    async function endListen() {
+      if (!st.listening) { st.pendingStop = true; return; }
+      st.listening = false;
+      micBtn.classList.remove('live');
+      showTip('正在识别…', 60000);
+      let t;
+      try { t = await (await api('/speech/stop')).json(); }
+      catch (e) { showTip('识别失败'); return; }
+      if (t.ok && t.text && t.text.trim()) {
+        injectSpeech(t.text.trim()) ? showTip('已输入到对话框') : showTip('未找到输入框');
+      } else if (!t.ok) {
+        showTip(t.error || '识别失败');
+      } else {
+        showTip('没有听清，请再试一次');
+      }
+    }
+    // 指针捕获替代 mouseleave：按钮只有 24px，按住时鼠标略移出按钮就会
+    // 触发 mouseleave 误停（识别会话瞬间结束 → 永远识别不出内容）。
+    // setPointerCapture 后拖出按钮在任意位置松开，pointerup 仍回到按钮。
+    micBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      try { micBtn.setPointerCapture(e.pointerId); } catch (err) { /* 无碍 */ }
+      beginListen();
+    });
+    micBtn.addEventListener('pointerup', endListen);
+    micBtn.addEventListener('pointercancel', endListen);
+    // 兜底：非指针环境（理论上 WebView2 都有指针事件）或捕获失败时，
+    // 全局 mouseup 也能结束监听
+    document.addEventListener('mouseup', endListen);
+    // ---- 背景：选择图片 / 清除 / 透明度 ----
+    bgBtn.onclick = () => { pop.classList.toggle('open'); reanchor(); };
     shadow.getElementById('pick').onclick = async () => { await api('/bg/pick'); applyState(); };
     shadow.getElementById('clear').onclick = async () => { await api('/bg/clear'); applyState(); };
     let t;
@@ -664,10 +845,9 @@
     });
   }
 
-  // ---------------- 语音输入（按住说话，仅 dsh 页面） ----------------
-  // 按住 🎤 → /speech/start（WinRT 连续识别）；松开 → /speech/stop 取文本，
-  // 注入 dsh 的受控输入框（native setter + input 事件绕过 React 检查）。
-  let speechUi = null;
+  // ---------------- 语音文本注入（工具栏按钮在 composer toolbar 里） ----------------
+  // /speech/stop 返回的文本注入 dsh 的受控输入框
+  // （native setter + input 事件绕过 React 检查）。
   function findComposer() {
     return document.querySelector('main textarea')
         || document.querySelector('textarea')
@@ -690,92 +870,11 @@
     }
     return true;
   }
-  function buildSpeechButton() {
-    if (speechUi || !onDsh) return;
-    const host = document.createElement('div');
-    host.id = 'dsh-shell-speech';
-    const shadow = host.attachShadow({ mode: 'open' });
-    shadow.innerHTML = `
-      <style>
-        .wrap { position:fixed; right:16px; bottom:64px; z-index:2147483647;
-                display:flex; flex-direction:column; align-items:center; gap:6px; }
-        .mic { width:44px; height:44px; border-radius:50%; border:1px solid light-dark(#dde1e7,#44464c);
-               background: light-dark(#fff,#2a2a2d); cursor:pointer; font-size:18px; line-height:1;
-               box-shadow:0 2px 8px rgba(0,0,0,.12); transition: transform .12s ease, background .15s ease; }
-        .mic:hover { transform: scale(1.08); }
-        .mic:active { transform: scale(.94); }
-        .mic.live { background:#e81123; border-color:#e81123;
-                    animation: dshMicPulse 1.2s ease-in-out infinite; }
-        @keyframes dshMicPulse { 0%,100% { box-shadow:0 0 0 0 rgba(232,17,35,.4); }
-                                 50% { box-shadow:0 0 0 10px rgba(232,17,35,0); } }
-        .tip { display:none; max-width:220px; padding:4px 10px; border-radius:6px;
-               font:12px/1.5 "Segoe UI","Microsoft YaHei",sans-serif; text-align:center;
-               color: light-dark(#1f2328,#e8eaed); background: light-dark(rgba(252,252,252,.97),rgba(42,42,45,.97));
-               border:1px solid light-dark(#dde1e7,#44464c); box-shadow:0 2px 10px rgba(0,0,0,.18); }
-        .tip.show { display:block; }
-      </style>
-      <div class="wrap">
-        <div class="tip">按住说话，松开后输入到对话框</div>
-        <button class="mic" title="语音输入（按住说话）">🎤</button>
-      </div>`;
-    document.documentElement.appendChild(host);
-    speechUi = { host, shadow };
-    const mic = shadow.querySelector('.mic');
-    const tip = shadow.querySelector('.tip');
-    let listening = false;
-    let pendingStop = false;
-    let tipTimer = null;
-    function showTip(msg, ms = 2500) {
-      tip.textContent = msg;
-      tip.classList.add('show');
-      clearTimeout(tipTimer);
-      tipTimer = setTimeout(() => tip.classList.remove('show'), ms);
-    }
-    async function beginListen() {
-      if (listening) return;
-      pendingStop = false;
-      let r;
-      try { r = await (await api('/speech/start')).json(); }
-      catch (e) { showTip('无法连接语音服务'); return; }
-      // 快速点按：松手发生在开始完成之前 → 立即停止，识别到多少算多少
-      if (pendingStop) {
-        try {
-          const t = await (await api('/speech/stop')).json();
-          if (t.ok && t.text && t.text.trim()) injectSpeech(t.text.trim());
-        } catch (e) { /* channel down */ }
-        return;
-      }
-      if (!r.ok) { showTip(r.error || '无法开始识别'); return; }
-      listening = true;
-      mic.classList.add('live');
-    }
-    async function endListen() {
-      if (!listening) { pendingStop = true; return; }
-      listening = false;
-      mic.classList.remove('live');
-      showTip('正在识别…', 60000);
-      let t;
-      try { t = await (await api('/speech/stop')).json(); }
-      catch (e) { showTip('识别失败'); return; }
-      if (t.ok && t.text && t.text.trim()) {
-        injectSpeech(t.text.trim()) ? showTip('已输入到对话框') : showTip('未找到输入框');
-      } else if (!t.ok) {
-        showTip(t.error || '识别失败');
-      } else {
-        showTip('没有听清，请再试一次');
-      }
-    }
-    mic.addEventListener('mousedown', (e) => { e.preventDefault(); beginListen(); });
-    // mouseleave + document mouseup 双保险：按住时拖出按钮/在按钮外松开都能结束
-    mic.addEventListener('mouseup', endListen);
-    mic.addEventListener('mouseleave', endListen);
-    document.addEventListener('mouseup', endListen);
-  }
 
   function init() {
     buildTitlebar();
     installChromeStyle();
-    if (onDsh) { buildPanel(); buildSpeechButton(); applyState(); installSettingsPageStyle(); }
+    if (onDsh) { buildComposerToolbar(); applyState(); installSettingsPageStyle(); }
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);

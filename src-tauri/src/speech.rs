@@ -16,9 +16,10 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::Foundation::TypedEventHandler;
+use windows::Media::Devices::{AudioDeviceRole, MediaDevice};
 use windows::Media::SpeechRecognition::{
     SpeechContinuousRecognitionResultGeneratedEventArgs, SpeechContinuousRecognitionSession,
     SpeechRecognitionResultStatus, SpeechRecognizer,
@@ -28,7 +29,7 @@ use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITH
 struct SpeechSession {
     stop: Arc<AtomicBool>,
     results: Arc<Mutex<String>>,
-    join: Option<thread::JoinHandle<()>>,
+    done: Option<mpsc::Receiver<()>>,
 }
 
 static SPEECH: Mutex<Option<SpeechSession>> = Mutex::new(None);
@@ -39,6 +40,7 @@ static SPEECH: Mutex<Option<SpeechSession>> = Mutex::new(None);
 /// that created it.
 fn run_session(
     stop: &AtomicBool,
+    finalized: Arc<AtomicBool>,
     results: Arc<Mutex<String>>,
     started: &mpsc::Sender<Result<(), String>>,
 ) {
@@ -54,16 +56,27 @@ fn run_session(
         Err(e) => return bail(format!("无法初始化连续识别：{e}")),
     };
     let results_for_event = results.clone();
+    let finalized_for_event = finalized.clone();
     let handler = TypedEventHandler::<
         SpeechContinuousRecognitionSession,
         SpeechContinuousRecognitionResultGeneratedEventArgs,
     >::new(move |_, args| {
-        // Keep the latest partial/final text; /speech/stop returns whatever
-        // the engine most recently heard.
         if let Some(args) = args.as_ref() {
             if let Ok(result) = args.Result() {
+                // 只保留最后一次非空文本：dictation 的中间结果经常是空串，
+                // 若把每次事件都写进去，最后一次空事件会把已识别内容冲掉，
+                // /speech/stop 就只会返回空文本。
                 if let Ok(text) = result.Text() {
-                    *results_for_event.lock().expect("speech results") = text.to_string();
+                    if !text.is_empty() {
+                        *results_for_event.lock().expect("speech results") = text.to_string();
+                    }
+                }
+                // 最终结果（说完后停顿片刻定稿）到达即通知主循环，stop 的
+                // 定稿宽限可以提前结束，不用白等。
+                if let Ok(status) = result.Status() {
+                    if status == SpeechRecognitionResultStatus::Success {
+                        finalized_for_event.store(true, Ordering::Relaxed);
+                    }
                 }
             }
         }
@@ -93,46 +106,77 @@ fn run_session(
     while !stop.load(Ordering::Relaxed) {
         thread::sleep(Duration::from_millis(50));
     }
+    // 定稿宽限：松开瞬间最后一句通常还是中间结果，引擎需要约半秒静音
+    // 才会产出最终结果；等到 Success 事件或 700ms 超时再停，避免丢尾。
+    let deadline = Instant::now() + Duration::from_millis(700);
+    while !finalized.load(Ordering::Relaxed) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(30));
+    }
     let _ = session.StopAsync().and_then(|op| op.get());
     let _ = session.RemoveResultGenerated(token);
 }
 
 fn speech_thread(
     stop: Arc<AtomicBool>,
+    finalized: Arc<AtomicBool>,
     results: Arc<Mutex<String>>,
     started: mpsc::Sender<Result<(), String>>,
 ) {
     let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
     if com.is_ok() {
-        run_session(&stop, results, &started);
+        run_session(&stop, finalized, results, &started);
     } else {
         let _ = started.send(Err(format!("COM 初始化失败：{com}")));
     }
     unsafe { CoUninitialize() };
 }
 
-/// Begin listening. Idempotent from the caller's view: any prior session is
+/// Start listening. Idempotent from the caller's view: any prior session is
 /// stopped first, so a new hold-to-talk press always starts clean.
 pub fn start() -> String {
     let mut guard = SPEECH.lock().expect("speech session");
-    if let Some(old) = guard.take() {
+    let old = guard.take();
+    drop(guard);
+    if let Some(old) = old {
         old.stop.store(true, Ordering::Relaxed);
-        if let Some(join) = old.join {
-            let _ = join.join();
-        }
+        await_teardown(old, Duration::from_secs(6));
     }
     let stop = Arc::new(AtomicBool::new(false));
+    let finalized = Arc::new(AtomicBool::new(false));
     let results = Arc::new(Mutex::new(String::new()));
     let (tx, rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
     let join = thread::spawn({
         let stop = stop.clone();
+        let finalized = finalized.clone();
         let results = results.clone();
-        move || speech_thread(stop, results, tx)
+        move || {
+            speech_thread(stop, finalized, results, tx);
+            let _ = done_tx.send(());
+        }
     });
     match rx.recv_timeout(Duration::from_secs(10)) {
         Ok(Ok(())) => {
-            *guard = Some(SpeechSession { stop, results, join: Some(join) });
-            "{\"ok\":true}".into()
+            *SPEECH.lock().expect("speech session") = Some(SpeechSession {
+                stop,
+                results,
+                done: Some(done_rx),
+            });
+            let _ = join; // detached; the done channel tracks teardown
+            // WinRT 识别器固定使用系统的“默认通信设备”麦克风。多数机器上
+            // 通信默认与用户平时选择的默认输入设备不同（比如蓝牙耳机只在
+            // 通话模式下才启用麦克风），提前告知前端，前端可以提示用户。
+            let comm = MediaDevice::GetDefaultAudioCaptureId(AudioDeviceRole::Communications);
+            let user = MediaDevice::GetDefaultAudioCaptureId(AudioDeviceRole::Default);
+            let mismatch = match (&comm, &user) {
+                (Ok(c), Ok(u)) => {
+                    let c = c.to_string();
+                    let u = u.to_string();
+                    !c.eq_ignore_ascii_case(&u)
+                }
+                _ => false,
+            };
+            serde_json::json!({"ok": true, "mic_mismatch": mismatch}).to_string()
         }
         Ok(Err(msg)) => {
             let _ = join.join();
@@ -140,12 +184,25 @@ pub fn start() -> String {
         }
         Err(_) => {
             // The worker is wedged (start never completed). Flag it so it
-            // exits if it ever unblocks, and keep the handle so a later
-            // /speech/stop can still join it.
+            // exits if it ever unblocks.
             stop.store(true, Ordering::Relaxed);
-            *guard = Some(SpeechSession { stop, results, join: Some(join) });
+            *SPEECH.lock().expect("speech session") = Some(SpeechSession {
+                stop,
+                results,
+                done: Some(done_rx),
+            });
+            let _ = join;
             "{\"ok\":false,\"error\":\"语音识别启动超时\"}".into()
         }
+    }
+}
+
+/// Wait (bounded) for the worker thread to finish tearing the session down.
+/// A wedged StopAsync must never block the control channel, so on timeout the
+/// worker is simply abandoned — the recognizer is left to clean itself up.
+fn await_teardown(mut s: SpeechSession, timeout: Duration) {
+    if let Some(done) = s.done.take() {
+        let _ = done.recv_timeout(timeout);
     }
 }
 
@@ -153,12 +210,16 @@ pub fn start() -> String {
 /// was recognized, e.g. the press was too short or speech never started).
 pub fn stop() -> String {
     let mut guard = SPEECH.lock().expect("speech session");
-    let Some(mut s) = guard.take() else {
+    let s = guard.take();
+    drop(guard);
+    let Some(mut s) = s else {
         return "{\"ok\":true,\"text\":\"\"}".into();
     };
     s.stop.store(true, Ordering::Relaxed);
-    if let Some(join) = s.join.take() {
-        let _ = join.join();
+    // Best effort: wait for the engine to finalize the last phrase (grace
+    // period inside the worker), but never hang the control channel.
+    if let Some(done) = s.done.take() {
+        let _ = done.recv_timeout(Duration::from_secs(6));
     }
     let text = s.results.lock().expect("speech results").clone();
     serde_json::json!({"ok": true, "text": text}).to_string()

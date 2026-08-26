@@ -37,7 +37,14 @@ static QUITTING: AtomicBool = AtomicBool::new(false);
 /// Random token gating the 3175 control channel. Only the injected page
 /// script knows it; any request without ?t=<token> is rejected. (An Origin
 /// allowlist is impossible: in dev the splash page sits on a random port.)
+/// `DSH_CTRL_TOKEN` overrides it for scripted/debugged runs; the random
+/// default is what a normal launch uses.
 fn make_control_token() -> String {
+    if let Ok(t) = std::env::var("DSH_CTRL_TOKEN") {
+        if !t.is_empty() {
+            return t;
+        }
+    }
     let mut buf = [0u8; 16];
     getrandom::getrandom(&mut buf).expect("OS randomness");
     buf.iter().map(|b| format!("{b:02x}")).collect()
